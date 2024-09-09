@@ -40,6 +40,7 @@
 #include <stdlib.h>
 
 static struct workflow* wf_backup(struct backup* backup);
+static struct workflow* wf_incremental_backup(void);
 static struct workflow* wf_restore(struct backup* backup);
 static struct workflow* wf_verify(struct backup* backup);
 static struct workflow* wf_archive(struct backup* backup);
@@ -68,6 +69,9 @@ pgmoneta_workflow_create(int workflow_type, struct backup* backup)
          break;
       case WORKFLOW_TYPE_RETENTION:
          return wf_retention(backup);
+         break;
+      case WORKFLOW_TYPE_INCREMENTAL_BACKUP:
+         return wf_incremental_backup();
          break;
       default:
          break;
@@ -349,6 +353,87 @@ wf_restore(struct backup* backup)
 
    current->next = pgmoneta_create_cleanup(CLEANUP_TYPE_RESTORE);
    current = current->next;
+
+   return head;
+}
+
+static struct workflow*
+wf_incremental_backup(void)
+{
+   struct workflow* head = NULL;
+   struct workflow* current = NULL;
+   struct configuration* config = NULL;
+
+   config = (struct configuration*)shmem;
+
+   head = pgmoneta_create_basebackup();
+   current = head;
+
+   current->next = pgmoneta_create_manifest();
+   current = current->next;
+
+   current->next = pgmoneta_create_extra();
+   current = current->next;
+
+   current->next = pgmoneta_storage_create_local();
+   current = current->next;
+
+   current->next = pgmoneta_create_hot_standby();
+   current = current->next;
+
+   if (config->compression_type == COMPRESSION_CLIENT_GZIP || config->compression_type == COMPRESSION_SERVER_GZIP)
+   {
+      current->next = pgmoneta_create_gzip(true);
+      current = current->next;
+   }
+   else if (config->compression_type == COMPRESSION_CLIENT_ZSTD || config->compression_type == COMPRESSION_SERVER_ZSTD)
+   {
+      current->next = pgmoneta_create_zstd(true);
+      current = current->next;
+   }
+   else if (config->compression_type == COMPRESSION_CLIENT_LZ4 || config->compression_type == COMPRESSION_SERVER_LZ4)
+   {
+      current->next = pgmoneta_create_lz4(true);
+      current = current->next;
+   }
+   else if (config->compression_type == COMPRESSION_CLIENT_BZIP2)
+   {
+      current->next = pgmoneta_create_bzip2(true);
+      current = current->next;
+   }
+
+   if (config->encryption != ENCRYPTION_NONE)
+   {
+      current->next = pgmoneta_encryption(true);
+      current = current->next;
+   }
+
+//   current->next = pgmoneta_workflow_create_link();
+//   current = current->next;
+
+   current->next = pgmoneta_create_permissions(PERMISSION_TYPE_BACKUP);
+   current = current->next;
+
+   if (config->storage_engine & STORAGE_ENGINE_SSH)
+   {
+      current->next = pgmoneta_create_sha256();
+      current = current->next;
+
+      current->next = pgmoneta_storage_create_ssh(WORKFLOW_TYPE_BACKUP);
+      current = current->next;
+   }
+
+   if (config->storage_engine & STORAGE_ENGINE_S3)
+   {
+      current->next = pgmoneta_storage_create_s3();
+      current = current->next;
+   }
+
+   if (config->storage_engine & STORAGE_ENGINE_AZURE)
+   {
+      current->next = pgmoneta_storage_create_azure();
+      current = current->next;
+   }
 
    return head;
 }

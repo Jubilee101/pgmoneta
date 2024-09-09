@@ -52,18 +52,24 @@ pgmoneta_backup(int client_fd, int server, uint8_t compression, uint8_t encrypti
    char date_str[128];
    char* date = NULL;
    char* elapsed = NULL;
+   char* incremental = NULL;
+   char* incremental_base = NULL;
    struct tm* time_info;
    time_t start_time;
    time_t end_time;
    int total_seconds;
+   int backup_index = -1;
    char* server_backup = NULL;
    char* root = NULL;
    char* d = NULL;
    unsigned long size;
+   int number_of_backups = 0;
+   struct backup** backups = NULL;
    struct workflow* workflow = NULL;
    struct workflow* current = NULL;
    struct deque* nodes = NULL;
    struct backup* backup = NULL;
+   struct json* req = NULL;
    struct json* response = NULL;
    struct configuration* config;
 
@@ -98,6 +104,9 @@ pgmoneta_backup(int client_fd, int server, uint8_t compression, uint8_t encrypti
    start_time = time(NULL);
 
    memset(&date_str[0], 0, sizeof(date_str));
+   req = (struct json*)pgmoneta_json_get(payload, MANAGEMENT_CATEGORY_REQUEST);
+   incremental = (char*)pgmoneta_json_get(req, MANAGEMENT_ARGUMENT_INCREMENTAL);
+
    time_info = localtime(&start_time);
    strftime(&date_str[0], sizeof(date_str), "%Y%m%d%H%M%S", time_info);
 
@@ -106,13 +115,66 @@ pgmoneta_backup(int client_fd, int server, uint8_t compression, uint8_t encrypti
    server_backup = pgmoneta_get_server_backup(server);
    root = pgmoneta_get_server_backup_identifier(server, date);
 
+   pgmoneta_deque_create(false, &nodes);
+
+   if (incremental != NULL)
+   {
+      if (pgmoneta_get_backups(server_backup, &number_of_backups, &backups))
+      {
+         goto error;
+      }
+
+      if (!strcmp(incremental, "oldest"))
+      {
+         for (int i = 0; backup_index == -1 && i < number_of_backups; i++)
+         {
+            if (backups[i] != NULL)
+            {
+               backup_index = i;
+            }
+         }
+      }
+      else if (!strcmp(incremental, "latest") || !strcmp(incremental, "newest"))
+      {
+         for (int i = number_of_backups - 1; backup_index == -1 && i >= 0; i--)
+         {
+            if (backups[i] != NULL)
+            {
+               backup_index = i;
+            }
+         }
+      }
+      else
+      {
+         for (int i = 0; backup_index == -1 && i < number_of_backups; i++)
+         {
+            if (backups[i] != NULL && !strcmp(backups[i]->label, incremental))
+            {
+               backup_index = i;
+            }
+         }
+      }
+
+      if (backup_index == -1)
+      {
+         pgmoneta_log_error("Backup: No incremental identifier for %s/%s", config->servers[server].name, incremental);
+         goto error;
+      }
+
+      incremental_base = pgmoneta_get_server_backup_identifier(server, backups[backup_index]->label);
+
+      pgmoneta_deque_add(nodes, "Incremental", (uintptr_t) incremental_base, ValueString);
+
+      workflow = pgmoneta_workflow_create(WORKFLOW_TYPE_INCREMENTAL_BACKUP, NULL);
+   }
+   else
+   {
+      workflow = pgmoneta_workflow_create(WORKFLOW_TYPE_BACKUP, NULL);
+   }
+
    pgmoneta_mkdir(root);
 
    d = pgmoneta_get_server_backup_identifier_data(server, date);
-
-   workflow = pgmoneta_workflow_create(WORKFLOW_TYPE_BACKUP, NULL);
-
-   pgmoneta_deque_create(false, &nodes);
 
    current = workflow;
    while (current != NULL)
@@ -202,10 +264,16 @@ done:
    pgmoneta_deque_destroy(nodes);
 
    free(date);
+   for (int i = 0; i < number_of_backups; i++)
+   {
+      free(backups[i]);
+   }
+   free(backups);
    free(backup);
    free(elapsed);
    free(server_backup);
    free(root);
+   free(incremental_base);
    free(d);
 
    pgmoneta_disconnect(client_fd);
@@ -215,6 +283,12 @@ done:
    exit(0);
 
 error:
+
+   for (int i = 0; i < number_of_backups; i++)
+   {
+      free(backups[i]);
+   }
+   free(backups);
 
    pgmoneta_json_destroy(payload);
 
@@ -227,6 +301,7 @@ error:
    free(elapsed);
    free(server_backup);
    free(root);
+   free(incremental_base);
    free(d);
 
    pgmoneta_disconnect(client_fd);
