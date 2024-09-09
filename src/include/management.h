@@ -122,6 +122,7 @@ extern "C" {
 #define MANAGEMENT_ARGUMENT_FREE_SPACE            "FreeSpace"
 #define MANAGEMENT_ARGUMENT_HASH_ALGORITHM        "HashAlgorithm"
 #define MANAGEMENT_ARGUMENT_HOT_STANDBY_SIZE      "HotStandbySize"
+#define MANAGEMENT_ARGUMENT_INCREMENTAL           "Incremental"
 #define MANAGEMENT_ARGUMENT_KEEP                  "Keep"
 #define MANAGEMENT_ARGUMENT_KEY                   "Key"
 #define MANAGEMENT_ARGUMENT_MAJOR_VERSION         "MajorVersion"
@@ -290,11 +291,12 @@ extern "C" {
  * @param server The server
  * @param compression The compress method for wire protocol
  * @param encryption The encrypt method for wire protocol
+ * @param incremental The base of incremental backup
  * @param output_format The output format
  * @return 0 upon success, otherwise 1
  */
 int
-pgmoneta_management_request_backup(SSL* ssl, int socket, char* server, uint8_t compression, uint8_t encryption, int32_t output_format);
+pgmoneta_management_request_backup(SSL* ssl, int socket, char* server, uint8_t compression, uint8_t encryption, char* incremental, int32_t output_format);
 
 /**
  * Create a list backup request

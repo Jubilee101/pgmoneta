@@ -39,13 +39,14 @@ extern "C" {
 #include <stdlib.h>
 #include <stdbool.h>
 
-#define WORKFLOW_TYPE_BACKUP        0
-#define WORKFLOW_TYPE_RESTORE       1
-#define WORKFLOW_TYPE_ARCHIVE       2
-#define WORKFLOW_TYPE_DELETE_BACKUP 3
-#define WORKFLOW_TYPE_RETENTION     4
-#define WORKFLOW_TYPE_WAL_SHIPPING  5
-#define WORKFLOW_TYPE_VERIFY        6
+#define WORKFLOW_TYPE_BACKUP                0
+#define WORKFLOW_TYPE_RESTORE               1
+#define WORKFLOW_TYPE_ARCHIVE               2
+#define WORKFLOW_TYPE_DELETE_BACKUP         3
+#define WORKFLOW_TYPE_RETENTION             4
+#define WORKFLOW_TYPE_WAL_SHIPPING          5
+#define WORKFLOW_TYPE_VERIFY                6
+#define WORKFLOW_TYPE_INCREMENTAL_BACKUP    7
 
 #define PERMISSION_TYPE_BACKUP  0
 #define PERMISSION_TYPE_RESTORE 1

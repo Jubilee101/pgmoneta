@@ -103,7 +103,7 @@ static void help_info(void);
 static void help_annotate(void);
 static void display_helper(char* command);
 
-static int backup(SSL* ssl, int socket, char* server, uint8_t compression, uint8_t encryption, int32_t output_format);
+static int backup(SSL* ssl, int socket, char* server, uint8_t compression, uint8_t encryption, char* incremental, int32_t output_format);
 static int list_backup(SSL* ssl, int socket, char* server, uint8_t compression, uint8_t encryption, int32_t output_format);
 static int restore(SSL* ssl, int socket, char* server, char* backup_id, char* position, char* directory, uint8_t compression, uint8_t encryption, int32_t output_format);
 static int verify(SSL* ssl, int socket, char* server, char* backup_id, char* directory, char* files, uint8_t compression, uint8_t encryption, int32_t output_format);
@@ -201,7 +201,7 @@ const struct pgmoneta_command command_table[] = {
    {
       .command = "backup",
       .subcommand = "",
-      .accepted_argument_count = {1},
+      .accepted_argument_count = {1, 2},
       .action = MANAGEMENT_BACKUP,
       .deprecated = false,
       .log_message = "<backup> [%s]",
@@ -701,7 +701,14 @@ password:
 
    if (parsed.cmd->action == MANAGEMENT_BACKUP)
    {
-      exit_code = backup(s_ssl, socket, parsed.args[0], compression, encryption, output_format);
+      if (parsed.args[1])
+      {
+         exit_code = backup(s_ssl, socket, parsed.args[0], compression, encryption, parsed.args[1], output_format);
+      }
+      else
+      {
+         exit_code = backup(s_ssl, socket, parsed.args[0], compression, encryption, NULL, output_format);
+      }
    }
    else if (parsed.cmd->action == MANAGEMENT_LIST_BACKUP)
    {
@@ -1068,9 +1075,9 @@ display_helper(char* command)
 }
 
 static int
-backup(SSL* ssl, int socket, char* server, uint8_t compression, uint8_t encryption, int32_t output_format)
+backup(SSL* ssl, int socket, char* server, uint8_t compression, uint8_t encryption, char* incremental, int32_t output_format)
 {
-   if (pgmoneta_management_request_backup(ssl, socket, server, compression, encryption, output_format))
+   if (pgmoneta_management_request_backup(ssl, socket, server, compression, encryption, incremental, output_format))
    {
       goto error;
    }
