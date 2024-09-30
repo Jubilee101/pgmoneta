@@ -51,6 +51,7 @@ pgmoneta_backup(int client_fd, int server, struct json* payload)
    bool active = false;
    char date[128];
    char* elapsed = NULL;
+   char* incremental = NULL;
    struct tm* time_info;
    time_t start_time;
    time_t end_time;
@@ -63,6 +64,7 @@ pgmoneta_backup(int client_fd, int server, struct json* payload)
    struct workflow* current = NULL;
    struct deque* nodes = NULL;
    struct backup* backup = NULL;
+   struct json* req = NULL;
    struct json* response = NULL;
    struct configuration* config;
 
@@ -96,6 +98,9 @@ pgmoneta_backup(int client_fd, int server, struct json* payload)
 
    start_time = time(NULL);
 
+   req = (struct json*)pgmoneta_json_get(payload, MANAGEMENT_CATEGORY_REQUEST);
+   incremental = (char*)pgmoneta_json_get(req, MANAGEMENT_ARGUMENT_INCREMENTAL);
+
    memset(&date[0], 0, sizeof(date));
    time_info = localtime(&start_time);
    strftime(&date[0], sizeof(date), "%Y%m%d%H%M%S", time_info);
@@ -107,9 +112,16 @@ pgmoneta_backup(int client_fd, int server, struct json* payload)
 
    d = pgmoneta_get_server_backup_identifier_data(server, &date[0]);
 
-   workflow = pgmoneta_workflow_create(WORKFLOW_TYPE_BACKUP);
+   if (incremental != NULL) {
+       workflow = pgmoneta_workflow_create(WORKFLOW_TYPE_INCREMENTAL_BACKUP);
+   } else {
+       workflow = pgmoneta_workflow_create(WORKFLOW_TYPE_BACKUP);
+   }
 
    pgmoneta_deque_create(false, &nodes);
+   if (incremental != NULL) {
+       pgmoneta_deque_add(nodes, MANAGEMENT_ARGUMENT_INCREMENTAL, (uintptr_t) incremental, ValueString);
+   }
 
    current = workflow;
    while (current != NULL)

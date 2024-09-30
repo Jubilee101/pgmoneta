@@ -31,6 +31,7 @@
 #include <backup.h>
 #include <info.h>
 #include <logging.h>
+#include <management.h>
 #include <memory.h>
 #include <message.h>
 #include <network.h>
@@ -100,6 +101,7 @@ basebackup_execute(int server, char* identifier, struct deque* nodes)
    char elapsed[128];
    int number_of_tablespaces = 0;
    char* label = NULL;
+   char* incremental = NULL;
    char version[10];
    char minor_version[10];
    char* wal = NULL;
@@ -122,6 +124,11 @@ basebackup_execute(int server, char* identifier, struct deque* nodes)
    struct tuple* tup = NULL;
    struct token_bucket* bucket = NULL;
    struct token_bucket* network_bucket = NULL;
+
+   incremental = (char*)pgmoneta_deque_get(nodes, MANAGEMENT_ARGUMENT_INCREMENTAL);
+   if (incremental != NULL) {
+       printf("incremental %s", incremental);
+   }
 
    config = (struct configuration*)shmem;
 

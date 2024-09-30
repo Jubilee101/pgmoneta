@@ -95,7 +95,7 @@ static void help_info(void);
 static void help_annotate(void);
 static void display_helper(char* command);
 
-static int backup(SSL* ssl, int socket, char* server, int32_t output_format);
+static int backup(SSL* ssl, int socket, char* server, char* incremental, int32_t output_format);
 static int list_backup(SSL* ssl, int socket, char* server, int32_t output_format);
 static int restore(SSL* ssl, int socket, char* server, char* backup_id, char* position, char* directory, int32_t output_format);
 static int verify(SSL* ssl, int socket, char* server, char* backup_id, char* directory, char* files, int32_t output_format);
@@ -178,7 +178,7 @@ const struct pgmoneta_command command_table[] = {
    {
       .command = "backup",
       .subcommand = "",
-      .accepted_argument_count = {1},
+      .accepted_argument_count = {1, 2},
       .action = MANAGEMENT_BACKUP,
       .deprecated = false,
       .log_message = "<backup> [%s]",
@@ -611,7 +611,12 @@ password:
 
    if (parsed.cmd->action == MANAGEMENT_BACKUP)
    {
-      exit_code = backup(s_ssl, socket, parsed.args[0], output_format);
+      if (parsed.args[1]) {
+          exit_code = backup(s_ssl, socket, parsed.args[0], parsed.args[1], output_format);
+      }  else {
+          exit_code = backup(s_ssl, socket, parsed.args[0], NULL, output_format);
+      }
+
    }
    else if (parsed.cmd->action == MANAGEMENT_LIST_BACKUP)
    {
@@ -978,9 +983,9 @@ display_helper(char* command)
 }
 
 static int
-backup(SSL* ssl, int socket, char* server, int32_t output_format)
+backup(SSL* ssl, int socket, char* server, char* incremental, int32_t output_format)
 {
-   if (pgmoneta_management_request_backup(ssl, socket, server, output_format))
+   if (pgmoneta_management_request_backup(ssl, socket, server, incremental, output_format))
    {
       goto error;
    }

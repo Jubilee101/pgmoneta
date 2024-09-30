@@ -54,7 +54,7 @@ static int write_socket(int socket, void* buf, size_t size);
 static int write_ssl(SSL* ssl, void* buf, size_t size);
 
 int
-pgmoneta_management_request_backup(SSL* ssl, int socket, char* server, int32_t output_format)
+pgmoneta_management_request_backup(SSL* ssl, int socket, char* server, char* incremental, int32_t output_format)
 {
    struct json* j = NULL;
    struct json* request = NULL;
@@ -70,6 +70,7 @@ pgmoneta_management_request_backup(SSL* ssl, int socket, char* server, int32_t o
    }
 
    pgmoneta_json_put(request, MANAGEMENT_ARGUMENT_SERVER, (uintptr_t)server, ValueString);
+   pgmoneta_json_put(request, MANAGEMENT_ARGUMENT_INCREMENTAL, (uintptr_t)incremental, ValueString);
 
    if (pgmoneta_management_write_json(ssl, socket, j))
    {
