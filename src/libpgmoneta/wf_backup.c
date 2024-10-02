@@ -126,8 +126,9 @@ basebackup_execute(int server, char* identifier, struct deque* nodes)
    struct token_bucket* network_bucket = NULL;
 
    incremental = (char*)pgmoneta_deque_get(nodes, MANAGEMENT_ARGUMENT_INCREMENTAL);
-   if (incremental != NULL) {
-       printf("incremental %s", incremental);
+   if (incremental != NULL)
+   {
+      printf("incremental %s", incremental);
    }
 
    config = (struct configuration*)shmem;

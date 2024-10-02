@@ -611,10 +611,13 @@ password:
 
    if (parsed.cmd->action == MANAGEMENT_BACKUP)
    {
-      if (parsed.args[1]) {
-          exit_code = backup(s_ssl, socket, parsed.args[0], parsed.args[1], output_format);
-      }  else {
-          exit_code = backup(s_ssl, socket, parsed.args[0], NULL, output_format);
+      if (parsed.args[1])
+      {
+         exit_code = backup(s_ssl, socket, parsed.args[0], parsed.args[1], output_format);
+      }
+      else
+      {
+         exit_code = backup(s_ssl, socket, parsed.args[0], NULL, output_format);
       }
 
    }
