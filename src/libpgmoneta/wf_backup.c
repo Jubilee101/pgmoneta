@@ -50,6 +50,8 @@ static int basebackup_setup(int, char*, struct deque*);
 static int basebackup_execute(int, char*, struct deque*);
 static int basebackup_teardown(int, char*, struct deque*);
 
+static int send_upload_manifest(SSL* ssl, int socket);
+
 struct workflow*
 pgmoneta_workflow_create_basebackup(void)
 {
@@ -125,16 +127,12 @@ basebackup_execute(int server, char* identifier, struct deque* nodes)
    struct token_bucket* bucket = NULL;
    struct token_bucket* network_bucket = NULL;
 
-   incremental = (char*)pgmoneta_deque_get(nodes, MANAGEMENT_ARGUMENT_INCREMENTAL);
-   if (incremental != NULL)
-   {
-      printf("incremental %s", incremental);
-   }
-
    config = (struct configuration*)shmem;
 
    pgmoneta_log_debug("Basebackup (execute): %s/%s", config->servers[server].name, identifier);
    pgmoneta_deque_list(nodes);
+
+   incremental = (char*)pgmoneta_deque_get(nodes, MANAGEMENT_ARGUMENT_INCREMENTAL);
 
    start_time = time(NULL);
 
@@ -229,6 +227,16 @@ basebackup_execute(int server, char* identifier, struct deque* nodes)
    {
       pgmoneta_log_info("Invalid credentials for %s", config->users[usr].username);
       goto error;
+   }
+
+   if (incremental != NULL)
+   {
+      // send UPLOAD_MANIFEST
+      if (send_upload_manifest())
+      {
+         pgmoneta_log_error("Fail to send UPLOAD_MANIFEST to server %s", config->servers[server].name);
+         goto error;
+      }
    }
 
    label = pgmoneta_append(label, "pgmoneta_");
@@ -444,4 +452,27 @@ basebackup_teardown(int server, char* identifier, struct deque* nodes)
    pgmoneta_deque_list(nodes);
 
    return 0;
+}
+
+static int
+send_upload_manifest(SSL* ssl, int socket)
+{
+   struct message* msg = NULL;
+   int status;
+   if (pgmoneta_create_query_message("UPLOAD_MANIFEST", &msg))
+   {
+      goto error;
+   }
+   status = pgmoneta_write_message(ssl, socket, msg);
+   if (status != MESSAGE_STATUS_OK)
+   {
+      goto error;
+   }
+
+   pgmoneta_free_message(msg);
+   return 0;
+
+   error:
+   pgmoneta_free_message(msg);
+   return 1;
 }
