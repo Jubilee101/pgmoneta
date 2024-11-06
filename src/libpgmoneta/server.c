@@ -170,6 +170,8 @@ pgmoneta_server_info(int srv)
    }
    pgmoneta_log_debug("%s/block_size %d", config->servers[srv].name, config->servers[srv].block_size);
 
+   config->servers[srv].relseg_size = config->servers[srv].segment_size / config->servers[srv].block_size;
+
    pgmoneta_write_terminate(ssl, socket);
 
 done:
@@ -204,6 +206,11 @@ pgmoneta_server_valid(int srv)
    }
 
    if (config->servers[srv].wal_size == 0)
+   {
+      return false;
+   }
+
+   if (config->servers[srv].segment_size == 0 || config->servers[srv].block_size == 0)
    {
       return false;
    }
