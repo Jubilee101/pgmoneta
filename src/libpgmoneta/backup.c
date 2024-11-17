@@ -163,7 +163,8 @@ pgmoneta_backup(int client_fd, int server, uint8_t compression, uint8_t encrypti
 
       incremental_base = pgmoneta_get_server_backup_identifier(server, backups[backup_index]->label);
 
-      pgmoneta_deque_add(nodes, "Incremental", (uintptr_t) incremental_base, ValueString);
+      pgmoneta_deque_add(nodes, "IncrementalBase", (uintptr_t) incremental_base, ValueString);
+      pgmoneta_deque_add(nodes, "IncrementalLabel", (uintptr_t) backups[backup_index]->label, ValueString);
 
       workflow = pgmoneta_workflow_create(WORKFLOW_TYPE_INCREMENTAL_BACKUP, NULL);
    }
