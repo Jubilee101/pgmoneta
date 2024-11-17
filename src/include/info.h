@@ -61,6 +61,11 @@ extern "C" {
 #define INFO_STATUS           "STATUS"
 #define INFO_TABLESPACES      "TABLESPACES"
 #define INFO_WAL              "WAL"
+#define INFO_TYPE             "TYPE"
+#define INFO_PARENT           "PARENT"
+
+#define TYPE_INCREMENTAL 1
+#define TYPE_FULL        0
 
 #define VALID_UNKNOWN -1
 #define VALID_FALSE    0
@@ -97,6 +102,8 @@ struct backup
    int encryption;                                                /**< The encryption type */
    char comments[MAX_COMMENT];                                    /**< The comments */
    char extra[MAX_EXTRA_PATH];                                    /**< The extra directory */
+   int type;                                                      /**< The backup type */
+   char parent_label[MISC_LENGTH];                                /**< The label of backup's parent, only used when backup is incremental */
 } __attribute__ ((aligned (64)));
 
 /**

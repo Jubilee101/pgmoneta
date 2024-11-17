@@ -105,6 +105,7 @@ basebackup_execute(int server, char* identifier, struct deque* nodes)
    int number_of_tablespaces = 0;
    char* label = NULL;
    char* incremental = NULL;
+   char* incremental_label = NULL;
    char* manifest_path = NULL;
    char version[10];
    char minor_version[10];
@@ -134,7 +135,15 @@ basebackup_execute(int server, char* identifier, struct deque* nodes)
    pgmoneta_log_debug("Basebackup (execute): %s/%s", config->servers[server].name, identifier);
    pgmoneta_deque_list(nodes);
 
-   incremental = (char*)pgmoneta_deque_get(nodes, MANAGEMENT_ARGUMENT_INCREMENTAL);
+   incremental = (char*)pgmoneta_deque_get(nodes, "IncrementalBase");
+   incremental_label = (char*)pgmoneta_deque_get(nodes, "IncrementalLabel");
+
+   if ((incremental != NULL && incremental_label == NULL) ||
+      (incremental == NULL && incremental_label != NULL))
+   {
+      pgmoneta_log_error("base and label for incremental should either be both NULL or both non-NULL\n");
+      goto error;
+   }
 
    start_time = time(NULL);
 
@@ -383,6 +392,14 @@ basebackup_execute(int server, char* identifier, struct deque* nodes)
    pgmoneta_update_info_unsigned_long(backup_base, INFO_START_TIMELINE, start_timeline);
    pgmoneta_update_info_unsigned_long(backup_base, INFO_END_TIMELINE, end_timeline);
    pgmoneta_update_info_unsigned_long(backup_base, INFO_HASH_ALGORITHM, hash);
+   if (incremental != NULL)
+   {
+      pgmoneta_update_info_unsigned_long(backup_base, INFO_TYPE, TYPE_INCREMENTAL);
+      pgmoneta_update_info_string(backup_base, INFO_PARENT, incremental_label);
+   } else
+   {
+      pgmoneta_update_info_unsigned_long(backup_base, INFO_TYPE, TYPE_FULL);
+   }
    // in case of parsing error
    if (chkptpos != NULL)
    {

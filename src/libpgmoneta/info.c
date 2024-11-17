@@ -929,6 +929,14 @@ pgmoneta_get_backup_file(char* fn, struct backup** backup)
          {
             bck->encryption = atoi(&value[0]);
          }
+         else if (pgmoneta_starts_with(&key[0], INFO_TYPE))
+         {
+            bck->type = atoi(&value[0]);
+         }
+         else if (pgmoneta_starts_with(&key[0], INFO_PARENT))
+         {
+            memcpy(&bck->parent_label[0], &value[0], strlen(&value[0]));
+         }
       }
    }
 
