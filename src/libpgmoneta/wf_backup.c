@@ -139,7 +139,7 @@ basebackup_execute(int server, char* identifier, struct deque* nodes)
    incremental_label = (char*)pgmoneta_deque_get(nodes, "IncrementalLabel");
 
    if ((incremental != NULL && incremental_label == NULL) ||
-      (incremental == NULL && incremental_label != NULL))
+       (incremental == NULL && incremental_label != NULL))
    {
       pgmoneta_log_error("base and label for incremental should either be both NULL or both non-NULL\n");
       goto error;
@@ -396,7 +396,8 @@ basebackup_execute(int server, char* identifier, struct deque* nodes)
    {
       pgmoneta_update_info_unsigned_long(backup_base, INFO_TYPE, TYPE_INCREMENTAL);
       pgmoneta_update_info_string(backup_base, INFO_PARENT, incremental_label);
-   } else
+   }
+   else
    {
       pgmoneta_update_info_unsigned_long(backup_base, INFO_TYPE, TYPE_FULL);
    }
