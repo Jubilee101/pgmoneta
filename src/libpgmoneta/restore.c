@@ -69,6 +69,21 @@ struct rfile
 };
 
 static char* restore_last_files_names[] = {"/global/pg_control"};
+
+/**
+ * Combine the provided backups
+ * @param input_dir The base directory of the current input incremental backup
+ * @param output_dir The base directory of the output incremental backup
+ * @param relative_dir The internal relative directory based on base directory
+ * (the last level of directory should not be followed by back slash)
+ * @param prior_backup_dirs The root directory of prior incremental/full backups, from newest to oldest
+ * @return 0 on success, 1 if otherwise
+ */
+static int combine_backups(char* input_dir,
+                           char* output_dir,
+                           char* relative_dir,
+                           struct deque* prior_backup_dirs);
+
 /**
  * Reconstruct an incremental backup file from itself and its prior incremental/full backup files to a full backup file
  * @param server The server
@@ -76,8 +91,7 @@ static char* restore_last_files_names[] = {"/global/pg_control"};
  * @param output_file_path The absolute path to the reconstructed full backup file
  * @param relative_dir The directory containing the incremental file relative to the root dir, should be the same across all backups
  * @param bare_file_name The name of the file without "INCREMENTAL." prefix
- * @param prior_backup_num The number of prior incremental/full backups
- * @param prior_backup_dirs The root directory of prior incremental/full backups
+ * @param prior_backup_dirs The root directory of prior incremental/full backups, from newest to oldest
  * @return 0 on success, 1 if otherwise
  */
 static int
@@ -86,8 +100,7 @@ reconstruct_backup_file(int server,
                         char* output_file_path,
                         char* relative_dir,
                         char* bare_file_name,
-                        int prior_backup_num,
-                        char** prior_backup_dirs);
+                        struct deque* prior_backup_dirs);
 
 /**
  * Get the number of blocks that the final reconstructed full backup file should have.
@@ -106,6 +119,9 @@ rfile_create(char* file_path, struct rfile** rfile);
 
 static void
 rfile_destroy(struct rfile* rf);
+
+static void
+rfile_destroy_cb(uintptr_t data);
 
 static int
 incremental_rfile_initialize(int server, char* file_path, struct rfile** rf);
@@ -362,15 +378,42 @@ error:
 }
 
 static int
+combine_backups(char* input_dir,
+                char* output_dir,
+                char* relative_dir,
+                struct deque* prior_backup_dirs)
+{
+   bool is_pg_tblspc = false;
+   bool is_pg_wal = false;
+   bool is_incremental_dir = false;
+   char ifulldir[MAX_PATH];
+   char ofulldir[MAX_PATH];
+
+   memset(ifulldir, 0, MAX_PATH);
+   memset(ofulldir, 0, MAX_PATH);
+
+   // categorize current directory
+   is_pg_tblspc = pgmoneta_compare_string(relative_dir, "pg_tblspc");
+   is_pg_wal = pgmoneta_starts_with(relative_dir, "pg_wal");
+   // incremental directories are subdirectories of base/ (files directly under base/ itself doesn't count),
+   // the pg_global directory itself (subdirectories doesn't count, only files directly under global),
+   // and subdirectories of pg_tblspc/
+   is_incremental_dir = pgmoneta_starts_with(relative_dir, "base/") ||
+                        pgmoneta_compare_string(relative_dir, "global") ||
+                        pgmoneta_starts_with(relative_dir, "pg_tblspc/");
+
+}
+
+static int
 reconstruct_backup_file(int server,
                         char* input_file_path,
                         char* output_file_path,
                         char* relative_dir,
                         char* bare_file_name,
-                        int prior_backup_num,
-                        char** prior_backup_dirs)
+                        struct deque* prior_backup_dirs)
 {
-   struct rfile** sources = NULL; // metadata of each incr/full backup file
+   struct deque* sources = NULL; // bookkeeping of each incr/full backup rfile
+   struct deque_iterator* bck_iter = NULL; // the iterator for backup directories
    struct rfile* latest_source = NULL; // the metadata of current incr backup file
    struct rfile** source_map = NULL; // source to find each block
    off_t* offset_map = NULL; // offsets to find each block in corresponding file
@@ -384,14 +427,14 @@ reconstruct_backup_file(int server,
    uint32_t nblocks = 0;
    size_t file_size = 0;
    struct rfile* copy_source = NULL;
+   struct value_config rfile_config = {.destroy_data=rfile_destroy_cb, .to_string=NULL};
 
    config = (struct configuration*)shmem;
 
    relsegsz = config->servers[server].relseg_size;
    blocksz = config->servers[server].block_size;
 
-   sources = malloc(sizeof(struct source*) * (1 + prior_backup_num));
-   memset(sources, 0, sizeof(struct source*) * (1 + prior_backup_num));
+   pgmoneta_deque_create(false, &sources);
 
    // handle the latest file specially, it is the only file that can only be incremental
    if (incremental_rfile_initialize(server, input_file_path, &latest_source))
@@ -406,7 +449,7 @@ reconstruct_backup_file(int server,
    // to some blocks getting modified), and then
    // if a block is the new limit block will be updated
    block_length = find_reconstructed_block_length(latest_source);
-   sources[prior_backup_num] = latest_source;
+   pgmoneta_deque_add_with_config(sources, NULL, (uintptr_t)latest_source, &rfile_config);
 
    source_map = malloc(sizeof(struct rfile*) * block_length);
    offset_map = malloc(sizeof(off_t) * block_length);
@@ -437,22 +480,24 @@ reconstruct_backup_file(int server,
    // There could be blocks that cannot be sourced. This is probably because the block gets truncated
    // during the backup process before it gets backed up. In this case just zero fill the block later,
    // the WAL replay will fix the inconsistency since it's getting truncated in the first place.
-   for (int idx = prior_backup_num - 1; idx >= 0; idx--)
+   pgmoneta_deque_iterator_create(prior_backup_dirs, &bck_iter);
+   while (pgmoneta_deque_iterator_next(bck_iter))
    {
       struct rfile* rf = NULL;
+      char* dir = (char*)pgmoneta_value_data(bck_iter->value);
       // try finding the full file
       memset(path, 0, MAX_PATH);
-      snprintf(path, MAX_PATH, "%s/%s/%s", prior_backup_dirs[idx], relative_dir, bare_file_name);
+      snprintf(path, MAX_PATH, "%s/%s/%s", dir, relative_dir, bare_file_name);
       if (rfile_create(path, &rf))
       {
          memset(path, 0, MAX_PATH);
-         snprintf(path, MAX_PATH, "%s/%s/INCREMENTAL.%s", prior_backup_dirs[idx], relative_dir, bare_file_name);
+         snprintf(path, MAX_PATH, "%s/%s/INCREMENTAL.%s", dir, relative_dir, bare_file_name);
          if (incremental_rfile_initialize(server, path, &rf))
          {
             goto error;
          }
       }
-      sources[idx] = rf;
+      pgmoneta_deque_add_with_config(sources, NULL, (uintptr_t)rf, &rfile_config);
 
       // If it's a full file, all blocks not sourced yet can be sourced from it.
       // And then we are done, no need to go further back.
@@ -516,16 +561,14 @@ reconstruct_backup_file(int server,
          goto error;
       }
    }
+   pgmoneta_deque_destroy(sources);
+   pgmoneta_deque_iterator_destroy(bck_iter);
+   free(source_map);
+   free(offset_map);
    return 0;
 error:
-   if (sources != NULL)
-   {
-      for (int i = 0; i < 1 + prior_backup_num; i++)
-      {
-         rfile_destroy(sources[i]);
-      }
-      free(sources);
-   }
+   pgmoneta_deque_destroy(sources);
+   pgmoneta_deque_iterator_destroy(bck_iter);
    free(source_map);
    free(offset_map);
    return 1;
@@ -589,6 +632,12 @@ rfile_destroy(struct rfile* rf)
    free(rf->filepath);
    free(rf->relative_block_numbers);
    free(rf);
+}
+
+static void
+rfile_destroy_cb(uintptr_t data)
+{
+   rfile_destroy((struct rfile*) data);
 }
 
 static int
@@ -710,7 +759,7 @@ read_block(struct rfile* rf, off_t offset, uint32_t blocksz, uint8_t* buffer)
    }
 
    return 0;
-   error:
+error:
    return 1;
 }
 
@@ -744,7 +793,8 @@ write_reconstructed_file(char* output_file_path,
             pgmoneta_log_error("reconstruct: fail to write to file %s", output_file_path);
             goto error;
          }
-      } else
+      }
+      else
       {
          // we might be able to use copy_file_range to have faster copy,
          // but for now let's stay in user space
@@ -764,7 +814,7 @@ write_reconstructed_file(char* output_file_path,
       fclose(wfp);
    }
    return 0;
-   error:
+error:
    if (wfp != NULL)
    {
       fclose(wfp);

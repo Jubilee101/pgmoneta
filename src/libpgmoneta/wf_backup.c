@@ -139,7 +139,7 @@ basebackup_execute(int server, char* identifier, struct deque* nodes)
    incremental_label = (char*)pgmoneta_deque_get(nodes, "IncrementalLabel");
 
    if ((incremental != NULL && incremental_label == NULL) ||
-      (incremental == NULL && incremental_label != NULL))
+       (incremental == NULL && incremental_label != NULL))
    {
       pgmoneta_log_error("base and label for incremental should either be both NULL or both non-NULL\n");
       goto error;
