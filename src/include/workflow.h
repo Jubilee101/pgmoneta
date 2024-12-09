@@ -47,6 +47,7 @@ extern "C" {
 #define WORKFLOW_TYPE_WAL_SHIPPING          5
 #define WORKFLOW_TYPE_VERIFY                6
 #define WORKFLOW_TYPE_INCREMENTAL_BACKUP    7
+#define WORKFLOW_TYPE_RESTORE_INCREMENTAL   8
 
 #define PERMISSION_TYPE_BACKUP  0
 #define PERMISSION_TYPE_RESTORE 1
@@ -71,6 +72,9 @@ extern "C" {
 #define NODE_SERVER_BACKUP "server_backup"
 #define NODE_SERVER_BASE   "server_base"
 #define NODE_TARFILE       "tarfile"
+#define NODE_LABEL_BATCH   "labels"
+#define NODE_PRIOR_BACKUPS "prior_backups"
+#define NODE_RECONSTRUCTION_INPUT "reconstruction_input"
 
 typedef int (* setup)(int, char*, struct deque*);
 typedef int (* execute)(int, char*, struct deque*);
@@ -91,11 +95,12 @@ struct workflow
 /**
  * Create a workflow
  * @param workflow_type The workflow type
+ * @param server The server
  * @param backup The backup
  * @return The workflow
  */
 struct workflow*
-pgmoneta_workflow_create(int workflow_type, struct backup* backup);
+pgmoneta_workflow_create(int workflow_type, int server, struct backup* backup);
 
 /**
  * Create standard workflow nodes
