@@ -46,6 +46,10 @@ static int restore_setup(int, char*, struct deque*);
 static int restore_execute(int, char*, struct deque*);
 static int restore_teardown(int, char*, struct deque*);
 
+static int batch_restore_relay_setup(int, char*, struct deque*);
+static int batch_restore_relay_execute(int, char*, struct deque*);
+static int batch_restore_relay_teardown(int, char*, struct deque*);
+
 static int recovery_info_setup(int, char*, struct deque*);
 static int recovery_info_execute(int, char*, struct deque*);
 static int recovery_info_teardown(int, char*, struct deque*);
@@ -340,6 +344,63 @@ restore_teardown(int server, char* identifier, struct deque* nodes)
    pgmoneta_deque_list(nodes);
 
    return 0;
+}
+
+static int batch_restore_relay_setup(int server, char* identifier, struct deque* nodes)
+{
+   struct configuration* config;
+
+   config = (struct configuration*)shmem;
+
+   pgmoneta_log_debug("Batch restore relay (setup): %s", config->servers[server].name);
+   pgmoneta_deque_list(nodes);
+
+   return 0;
+}
+
+static int batch_restore_relay_execute(int server, char* identifier, struct deque* nodes)
+{
+   struct deque* labels = NULL;
+   struct deque* prior_backups = NULL;
+   char* next_label = NULL;
+   char* destination = NULL;
+   struct deque_iterator* iter = NULL;
+
+   labels = (struct deque*)pgmoneta_deque_get(nodes, NODE_LABEL_BATCH);
+   prior_backups = (struct deque*)pgmoneta_deque_get(nodes, NODE_PRIOR_BACKUPS);
+   next_label = (char*)pgmoneta_deque_poll(labels, NULL);
+   destination = (char*)pgmoneta_deque_get(nodes, NODE_DESTINATION);
+
+   // add the destination to prior_backups
+   // TODO: iff it's not the current incr backup
+   pgmoneta_deque_add(prior_backups, NULL, (uintptr_t)destination, ValueString);
+
+   pgmoneta_deque_iterator_create(nodes, &iter);
+   while (pgmoneta_deque_iterator_next(iter))
+   {
+      // Keep the destination, position, prior_backups and the remaining labels
+      // since they'll remain unchanged. Remove the rest in case they unexpectedly
+      // affect the next restore workflow
+      if (pgmoneta_compare_string(iter->tag, NODE_DIRECTORY) ||
+         pgmoneta_compare_string(iter->tag, NODE_POSITION) ||
+         pgmoneta_compare_string(iter->tag, NODE_PRIOR_BACKUPS) ||
+         pgmoneta_compare_string(iter->tag, NODE_LABEL_BATCH))
+      {
+         continue;
+      }
+      pgmoneta_deque_iterator_remove(iter);
+   }
+   pgmoneta_deque_add(nodes, NODE_LABEL, (uintptr_t)next_label, ValueString);
+
+   // free the next_label since adding to deque makes a copy of it
+   // no need to free destination since we already removed the original node
+   free(next_label);
+   pgmoneta_deque_iterator_destroy(iter);
+}
+
+static int batch_restore_relay_teardown(int server, char* identifier, struct deque* nodes)
+{
+
 }
 
 static int

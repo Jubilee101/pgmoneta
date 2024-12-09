@@ -42,6 +42,7 @@
 static struct workflow* wf_backup(struct backup* backup);
 static struct workflow* wf_incremental_backup(void);
 static struct workflow* wf_restore(struct backup* backup);
+static struct workflow* wf_restore_incremental(struct backup* backup);
 static struct workflow* wf_verify(struct backup* backup);
 static struct workflow* wf_archive(struct backup* backup);
 static struct workflow* wf_delete_backup(struct backup* backup);
@@ -57,6 +58,9 @@ pgmoneta_workflow_create(int workflow_type, struct backup* backup)
          break;
       case WORKFLOW_TYPE_RESTORE:
          return wf_restore(backup);
+         break;
+   case WORKFLOW_TYPE_RESTORE_INCREMENTAL:
+         return wf_restore_incremental(backup);
          break;
       case WORKFLOW_TYPE_VERIFY:
          return wf_verify(backup);
@@ -355,6 +359,14 @@ wf_restore(struct backup* backup)
    current = current->next;
 
    return head;
+}
+
+static struct workflow*
+wf_restore_incremental(struct backup* backup)
+{
+   struct workflow* head = NULL;
+   struct workflow* current = NULL;
+   struct backup* bck = backup;
 }
 
 static struct workflow*
