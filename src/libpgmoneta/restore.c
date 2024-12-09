@@ -311,7 +311,17 @@ pgmoneta_restore_backup(int server, char* identifier, char* position, char* dire
       goto error;
    }
 
-   workflow = pgmoneta_workflow_create(WORKFLOW_TYPE_RESTORE, backup);
+   if (backup->type == TYPE_FULL)
+   {
+      workflow = pgmoneta_workflow_create(WORKFLOW_TYPE_RESTORE, server, backup);
+   } else if (backup->type == TYPE_INCREMENTAL)
+   {
+      workflow = pgmoneta_workflow_create(WORKFLOW_TYPE_RESTORE_INCREMENTAL, server, backup);
+   } else
+   {
+      pgmoneta_log_error("unidentified backup type %d", backup->type);
+      goto error;
+   }
 
    current = workflow;
    while (current != NULL)

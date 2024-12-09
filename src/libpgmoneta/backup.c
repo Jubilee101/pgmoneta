@@ -166,11 +166,11 @@ pgmoneta_backup(int client_fd, int server, uint8_t compression, uint8_t encrypti
       pgmoneta_deque_add(nodes, "IncrementalBase", (uintptr_t) incremental_base, ValueString);
       pgmoneta_deque_add(nodes, "IncrementalLabel", (uintptr_t) backups[backup_index]->label, ValueString);
 
-      workflow = pgmoneta_workflow_create(WORKFLOW_TYPE_INCREMENTAL_BACKUP, NULL);
+      workflow = pgmoneta_workflow_create(WORKFLOW_TYPE_INCREMENTAL_BACKUP, server, NULL);
    }
    else
    {
-      workflow = pgmoneta_workflow_create(WORKFLOW_TYPE_BACKUP, NULL);
+      workflow = pgmoneta_workflow_create(WORKFLOW_TYPE_BACKUP, server, NULL);
    }
 
    pgmoneta_mkdir(root);
@@ -561,7 +561,7 @@ pgmoneta_delete_backup(int client_fd, int srv, uint8_t compression, uint8_t encr
       goto error;
    }
 
-   workflow = pgmoneta_workflow_create(WORKFLOW_TYPE_DELETE_BACKUP, NULL);
+   workflow = pgmoneta_workflow_create(WORKFLOW_TYPE_DELETE_BACKUP, srv, NULL);
 
    current = workflow;
    while (current != NULL)
