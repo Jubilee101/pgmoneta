@@ -61,7 +61,7 @@ pgmoneta_workflow_create(int workflow_type, int server, struct backup* backup)
       case WORKFLOW_TYPE_RESTORE:
          return wf_restore(backup);
          break;
-   case WORKFLOW_TYPE_RESTORE_INCREMENTAL:
+      case WORKFLOW_TYPE_RESTORE_INCREMENTAL:
          return wf_restore_incremental(server, backup);
          break;
       case WORKFLOW_TYPE_VERIFY:

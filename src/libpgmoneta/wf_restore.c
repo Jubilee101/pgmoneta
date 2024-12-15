@@ -388,7 +388,8 @@ restore_teardown(int server, char* identifier, struct deque* nodes)
    return 0;
 }
 
-static int restore_incremental_setup(int server, char* identifier, struct deque* nodes)
+static int
+restore_incremental_setup(int server, char* identifier, struct deque* nodes)
 {
    struct configuration* config;
 
@@ -400,17 +401,38 @@ static int restore_incremental_setup(int server, char* identifier, struct deque*
    return 0;
 }
 
-static int restore_incremental_execute(int server, char* identifier, struct deque* nodes)
+static int
+restore_incremental_execute(int server, char* identifier, struct deque* nodes)
+{
+   struct deque* prior_backups = NULL;
+   char* input_dir = NULL;
+   char* output_dir = NULL;
+   prior_backups = (struct deque*)pgmoneta_deque_get(nodes, NODE_BACKUPS);
+   if (prior_backups == NULL || pgmoneta_deque_size(prior_backups) < 2)
+   {
+      pgmoneta_log_error("Restore incremental: should have at least 2 backups");
+      goto error;
+   }
+   input_dir = (char*)pgmoneta_deque_poll(prior_backups, NULL);
+   output_dir = (char*)pgmoneta_deque_get(nodes, NODE_RECONSTRUCTION);
+   if (output_dir == NULL || strlen(output_dir) == 0)
+   {
+      pgmoneta_log_error("Restore incremental: reconstruction output directory should not be empty");
+      goto error;
+   }
+   return 0;
+   error:
+   return 1;
+}
+
+static int
+restore_incremental_teardown(int server, char* identifier, struct deque* nodes)
 {
 
 }
 
-static int restore_incremental_teardown(int server, char* identifier, struct deque* nodes)
-{
-
-}
-
-static int batch_restore_relay_setup(int server, char* identifier, struct deque* nodes)
+static int
+batch_restore_relay_setup(int server, char* identifier, struct deque* nodes)
 {
    struct configuration* config;
 
@@ -422,63 +444,76 @@ static int batch_restore_relay_setup(int server, char* identifier, struct deque*
    return 0;
 }
 
-static int batch_restore_relay_execute(int server, char* identifier, struct deque* nodes)
+static int
+batch_restore_relay_execute(int server, char* identifier, struct deque* nodes)
 {
-   struct deque* labels = NULL;
    struct deque* prior_backups = NULL;
    char* label = NULL;
+   struct backup* bck = NULL;
    struct deque_iterator* iter = NULL;
    struct configuration* config;
+   char* server_dir = pgmoneta_get_server_backup(server);
 
    config = (struct configuration*)shmem;
 
    pgmoneta_log_trace("Batch restore relay (execute): %s/%s", config->servers[server].name, identifier);
 
-   labels = (struct deque*)pgmoneta_deque_get(nodes, NODE_LABEL_BATCH);
-   prior_backups = (struct deque*)pgmoneta_deque_get(nodes, NODE_PRIOR_BACKUPS);
+   label = (char*) pgmoneta_deque_get(nodes, NODE_LABEL);
+
+   // This isn't ideal because we have read the backup info previously when constructing the workflow,
+   // but for now we have no choice but to read a second time
+   if (pgmoneta_get_backup(server_dir, label, &bck))
+   {
+      goto error;
+   }
+
+   prior_backups = (struct deque*)pgmoneta_deque_get(nodes, NODE_BACKUPS);
    if (prior_backups == NULL)
    {
       pgmoneta_deque_create(false, &prior_backups);
-      pgmoneta_deque_add(nodes, NODE_PRIOR_BACKUPS, (uintptr_t)prior_backups, ValueDeque);
+      pgmoneta_deque_add(nodes, NODE_BACKUPS, (uintptr_t)prior_backups, ValueDeque);
    }
-   label = (char*)pgmoneta_deque_poll(labels, NULL);
 
-   // add the destination to prior_backups if it's not the current backup
-   if (!pgmoneta_compare_string(identifier, (char*)pgmoneta_deque_get(nodes, NODE_LABEL)))
-   {
-      pgmoneta_deque_add(prior_backups, NULL, pgmoneta_deque_get(nodes, NODE_DESTINATION), ValueString);
-   } else
-   {
-      // add the destination to nodes, it's going to be our reconstruction input directory
-      pgmoneta_deque_add(nodes, NODE_RECONSTRUCTION_INPUT, pgmoneta_deque_get(nodes, NODE_DESTINATION), ValueString);
-   }
+   pgmoneta_deque_add(prior_backups, NULL, pgmoneta_deque_get(nodes, NODE_DESTINATION), ValueString);
 
    pgmoneta_deque_iterator_create(nodes, &iter);
    while (pgmoneta_deque_iterator_next(iter))
    {
-      // Keep the destination, position, prior_backups and the remaining labels
-      // since they'll remain unchanged. Remove the rest in case they unexpectedly
+      // Keep the directory, position, prior_backups
+      // since they'll remain unchanged. Purge the rest in case they unexpectedly
       // affect the next restore workflow
       if (pgmoneta_compare_string(iter->tag, NODE_DIRECTORY) ||
-         pgmoneta_compare_string(iter->tag, NODE_POSITION) ||
-         pgmoneta_compare_string(iter->tag, NODE_PRIOR_BACKUPS) ||
-         pgmoneta_compare_string(iter->tag, NODE_LABEL_BATCH) ||
-         pgmoneta_compare_string(iter->tag, NODE_RECONSTRUCTION_INPUT))
+          pgmoneta_compare_string(iter->tag, NODE_POSITION) ||
+          pgmoneta_compare_string(iter->tag, NODE_BACKUPS) ||
+          pgmoneta_compare_string(iter->tag, NODE_RECONSTRUCTION))
       {
          continue;
       }
       pgmoneta_deque_iterator_remove(iter);
    }
-   pgmoneta_deque_add(nodes, NODE_LABEL, (uintptr_t)label, ValueString);
+
+   // restore stops at full backup
+   if (bck->type != TYPE_FULL)
+   {
+      pgmoneta_deque_add(nodes, NODE_LABEL, (uintptr_t)bck->parent_label, ValueString);
+   }
 
    // free the label since adding to deque makes a copy of it
-   free(label);
+   free(bck);
+   free(server_dir);
    pgmoneta_deque_iterator_destroy(iter);
 
    return 0;
+
+error:
+   free(bck);
+   free(server_dir);
+   pgmoneta_deque_iterator_destroy(iter);
+   return 1;
 }
 
-static int batch_restore_relay_teardown(int server, char* identifier, struct deque* nodes)
+static int
+batch_restore_relay_teardown(int server, char* identifier, struct deque* nodes)
 {
    struct configuration* config;
 

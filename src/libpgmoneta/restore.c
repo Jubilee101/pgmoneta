@@ -290,34 +290,68 @@ pgmoneta_restore_backup(int server, char* identifier, char* position, char* dire
    struct workflow* current = NULL;
    struct deque* nodes = NULL;
    struct backup* backup = NULL;
+   char directory_incremental[MAX_PATH];
+
+   memset(directory_incremental, 0, MAX_PATH);
 
    *output = NULL;
    *label = NULL;
 
    pgmoneta_deque_create(false, &nodes);
 
-   if (pgmoneta_deque_add(nodes, NODE_POSITION, (uintptr_t)position, ValueString))
-   {
-      goto error;
-   }
-
-   if (pgmoneta_deque_add(nodes, NODE_DIRECTORY, (uintptr_t)directory, ValueString))
-   {
-      goto error;
-   }
-
    if (pgmoneta_workflow_nodes(server, identifier, nodes, &backup))
+   {
+      goto error;
+   }
+
+   if (pgmoneta_deque_add(nodes, NODE_POSITION, (uintptr_t)position, ValueString))
    {
       goto error;
    }
 
    if (backup->type == TYPE_FULL)
    {
+      if (pgmoneta_deque_add(nodes, NODE_DIRECTORY, (uintptr_t)directory, ValueString))
+      {
+         goto error;
+      }
+   }
+   else if (backup->type == TYPE_INCREMENTAL)
+   {
+      if (!pgmoneta_ends_with(directory, "/"))
+      {
+         snprintf(directory_incremental, "%s/pgmoneta_incremental_%s", directory, backup->label);
+      }
+      else
+      {
+         snprintf(directory_incremental, "%spgmoneta_incremental_%s", directory, backup->label);
+      }
+
+      if (pgmoneta_deque_add(nodes, NODE_DIRECTORY, (uintptr_t)directory_incremental, ValueString))
+      {
+         goto error;
+      }
+
+      if (pgmoneta_deque_add(nodes, NODE_RECONSTRUCTION, (uintptr_t)directory, ValueString))
+      {
+         goto error;
+      }
+   }
+   else
+   {
+      pgmoneta_log_error("unidentified backup type %d", backup->type);
+      goto error;
+   }
+
+   if (backup->type == TYPE_FULL)
+   {
       workflow = pgmoneta_workflow_create(WORKFLOW_TYPE_RESTORE, server, backup);
-   } else if (backup->type == TYPE_INCREMENTAL)
+   }
+   else if (backup->type == TYPE_INCREMENTAL)
    {
       workflow = pgmoneta_workflow_create(WORKFLOW_TYPE_RESTORE_INCREMENTAL, server, backup);
-   } else
+   }
+   else
    {
       pgmoneta_log_error("unidentified backup type %d", backup->type);
       goto error;
@@ -432,6 +466,10 @@ combine_backups_recursive(int server,
       memcpy(ifulldir, input_dir, MAX_PATH);
       memcpy(ofulldir, output_dir, MAX_PATH);
       //TODO: need to handle relative tablespace path specially here
+
+      // when relative directory is NULL, either it's the data root directory,
+      // or it's the tablespace directory(pg_tblspc), only the latter case
+      // we'll need to deal with incremental files within, the former case is invalid
    }
    else
    {
@@ -520,16 +558,17 @@ combine_backups_recursive(int server,
          // finally found an incremental file
          snprintf(ofullpath, MAX_PATH, "%s/%s", ofulldir, entry->d_name + INCREMENTAL_PREFIX_LENGTH);
          if (reconstruct_backup_file(server,
-            ifullpath,
-            ofullpath,
-            relative_prefix,
-            entry->d_name + INCREMENTAL_PREFIX_LENGTH,
-            prior_backup_dirs))
+                                     ifullpath,
+                                     ofullpath,
+                                     relative_prefix,
+                                     entry->d_name + INCREMENTAL_PREFIX_LENGTH,
+                                     prior_backup_dirs))
          {
             pgmoneta_log_error("unable to reconstruct file %s", ifullpath);
             goto error;
          }
-      } else
+      }
+      else
       {
          // copy the full file from input dir to output dir
          snprintf(ofullpath, MAX_PATH, "%s/%s", ofulldir, entry->d_name);
@@ -633,7 +672,8 @@ reconstruct_backup_file(int server,
       char* dir = (char*)pgmoneta_value_data(bck_iter->value);
       // try finding the full file
       memset(path, 0, MAX_PATH);
-      snprintf(path, MAX_PATH, "%s/%s/%s", dir, relative_dir, bare_file_name);
+      // relative directory always ends with '/'
+      snprintf(path, MAX_PATH, "%s/%s%s", dir, relative_dir, bare_file_name);
       if (rfile_create(path, &rf))
       {
          memset(path, 0, MAX_PATH);
