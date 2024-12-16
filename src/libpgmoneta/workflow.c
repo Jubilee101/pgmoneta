@@ -399,7 +399,10 @@ wf_restore_incremental(int server, struct backup* backup)
    assert(strlen(label) == 0);
 #endif
 
-   current->next = pgmoneta_create_restore_incremental();
+   current->next = pgmoneta_create_combine_incremental();
+   current = current->next;
+
+   current->next = pgmoneta_create_cleanup(CLEANUP_TYPE_RESTORE_INCREMENTAL);
    current = current->next;
 
    free(server_dir);

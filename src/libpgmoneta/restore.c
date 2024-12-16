@@ -291,8 +291,13 @@ pgmoneta_restore_backup(int server, char* identifier, char* position, char* dire
    struct deque* nodes = NULL;
    struct backup* backup = NULL;
    char directory_incremental[MAX_PATH];
+   char directory_combine[MAX_PATH];
+   struct configuration* config;
+
+   config = (struct configuration*)shmem;
 
    memset(directory_incremental, 0, MAX_PATH);
+   memset(directory_combine, 0, MAX_PATH);
 
    *output = NULL;
    *label = NULL;
@@ -320,11 +325,13 @@ pgmoneta_restore_backup(int server, char* identifier, char* position, char* dire
    {
       if (!pgmoneta_ends_with(directory, "/"))
       {
-         snprintf(directory_incremental, "%s/pgmoneta_incremental_%s", directory, backup->label);
+         snprintf(directory_incremental, MAX_PATH, "%s/pgmoneta_incremental_%s", directory, &backup->label[0]);
+         snprintf(directory_combine, MAX_PATH, "%s/%s-%s", directory, config->servers[server].name, &backup->label[0]);
       }
       else
       {
-         snprintf(directory_incremental, "%spgmoneta_incremental_%s", directory, backup->label);
+         snprintf(directory_incremental, MAX_PATH,"%spgmoneta_incremental_%s", directory, &backup->label[0]);
+         snprintf(directory_combine, MAX_PATH, "%s%s-%s", directory, config->servers[server].name, &backup->label[0]);
       }
 
       if (pgmoneta_deque_add(nodes, NODE_DIRECTORY, (uintptr_t)directory_incremental, ValueString))
@@ -332,7 +339,7 @@ pgmoneta_restore_backup(int server, char* identifier, char* position, char* dire
          goto error;
       }
 
-      if (pgmoneta_deque_add(nodes, NODE_RECONSTRUCTION, (uintptr_t)directory, ValueString))
+      if (pgmoneta_deque_add(nodes, NODE_COMBINE, (uintptr_t)directory_combine, ValueString))
       {
          goto error;
       }
@@ -423,6 +430,17 @@ pgmoneta_restore_backup(int server, char* identifier, char* position, char* dire
    return 0;
 
 error:
+   if (backup != NULL && backup->type == TYPE_INCREMENTAL)
+   {
+      if (strlen(directory_incremental) != 0)
+      {
+         pgmoneta_delete_directory(directory_incremental);
+      }
+      if (strlen(directory_combine) != 0)
+      {
+         pgmoneta_delete_directory(directory_combine);
+      }
+   }
    free(backup);
 
    pgmoneta_workflow_destroy(workflow);
@@ -430,6 +448,12 @@ error:
    pgmoneta_deque_destroy(nodes);
 
    return 1;
+}
+
+int
+pgmoneta_combine_backups(int server, char* input_dir, char* output_dir, struct deque* prior_backup_dirs)
+{
+   return combine_backups_recursive(server, input_dir, output_dir, NULL, prior_backup_dirs);
 }
 
 static int
@@ -440,7 +464,7 @@ combine_backups_recursive(int server,
                           struct deque* prior_backup_dirs)
 {
    bool is_pg_tblspc = false;
-   bool is_pg_wal = false;
+   // bool is_pg_wal = false;
    bool is_incremental_dir = false;
    char ifulldir[MAX_PATH];
    char ofulldir[MAX_PATH];
@@ -454,7 +478,7 @@ combine_backups_recursive(int server,
 
    // categorize current directory
    is_pg_tblspc = pgmoneta_compare_string(relative_dir, "pg_tblspc");
-   is_pg_wal = pgmoneta_compare_string(relative_dir, "pg_wal") || pgmoneta_starts_with(relative_dir, "pg_wal");
+   // is_pg_wal = pgmoneta_compare_string(relative_dir, "pg_wal") || pgmoneta_starts_with(relative_dir, "pg_wal");
    // incremental directories are subdirectories of base/ (files directly under base/ itself doesn't count),
    // the pg_global directory itself (subdirectories doesn't count, only files directly under global),
    // and subdirectories of pg_tblspc/
@@ -606,7 +630,6 @@ reconstruct_backup_file(int server,
    bool full_copy_possible = true; // whether we could just copy over directly instead of block by block
    uint32_t b = 0; // temp variable for block numbers
    struct configuration* config;
-   size_t relsegsz = 0;
    size_t blocksz = 0;
    char path[MAX_PATH];
    uint32_t nblocks = 0;
@@ -616,7 +639,6 @@ reconstruct_backup_file(int server,
 
    config = (struct configuration*)shmem;
 
-   relsegsz = config->servers[server].relseg_size;
    blocksz = config->servers[server].block_size;
 
    pgmoneta_deque_create(false, &sources);

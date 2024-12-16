@@ -64,7 +64,7 @@ pgmoneta_create_batch_restore_relay(void);
  * @return The workflow
  */
 struct workflow*
-pgmoneta_create_restore_incremental(void);
+pgmoneta_create_combine_incremental(void);
 
 /**
  * Create a workflow for the verify

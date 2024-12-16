@@ -53,27 +53,28 @@ extern "C" {
 #define PERMISSION_TYPE_RESTORE 1
 #define PERMISSION_TYPE_ARCHIVE 2
 
-#define CLEANUP_TYPE_RESTORE 0
+#define CLEANUP_TYPE_RESTORE             0
+#define CLEANUP_TYPE_RESTORE_INCREMENTAL 1
 
-#define NODE_ALL            "all"
-#define NODE_BACKUP         "backup"
-#define NODE_BACKUP_BASE    "backup_base"
-#define NODE_BACKUP_DATA    "backup_data"
-#define NODE_DESTINATION    "destination"
-#define NODE_DIRECTORY      "directory"
-#define NODE_FAILED         "failed"
-#define NODE_FILES          "files"
-#define NODE_IDENTIFIER     "identifier"
-#define NODE_LABEL          "label"
-#define NODE_OUTPUT         "output"
-#define NODE_POSITION       "position"
-#define NODE_PRIMARY        "primary"
-#define NODE_RECOVERY_INFO  "recovery_info"
-#define NODE_SERVER_BACKUP  "server_backup"
-#define NODE_SERVER_BASE    "server_base"
-#define NODE_TARFILE        "tarfile"
-#define NODE_BACKUPS        "backups"
-#define NODE_RECONSTRUCTION "reconstruction" // the reconstruction output directory
+#define NODE_ALL           "all"
+#define NODE_BACKUP        "backup"
+#define NODE_BACKUP_BASE   "backup_base"
+#define NODE_BACKUP_DATA   "backup_data"
+#define NODE_DESTINATION   "destination"
+#define NODE_DIRECTORY     "directory"
+#define NODE_FAILED        "failed"
+#define NODE_FILES         "files"
+#define NODE_IDENTIFIER    "identifier"
+#define NODE_LABEL         "label"
+#define NODE_OUTPUT        "output"
+#define NODE_POSITION      "position"
+#define NODE_PRIMARY       "primary"
+#define NODE_RECOVERY_INFO "recovery_info"
+#define NODE_SERVER_BACKUP "server_backup"
+#define NODE_SERVER_BASE   "server_base"
+#define NODE_TARFILE       "tarfile"
+#define NODE_BACKUPS       "backups"
+#define NODE_COMBINE       "combine" // the combine output directory
 
 typedef int (* setup)(int, char*, struct deque*);
 typedef int (* execute)(int, char*, struct deque*);

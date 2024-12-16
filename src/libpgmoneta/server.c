@@ -556,15 +556,16 @@ get_ext_version(SSL* ssl, int socket, char** version)
       goto error;
    }
 
-   error:
-      if (qr != NULL)
-      {
-         pgmoneta_free_query_response(qr);
-      }
+error:
+   if (qr != NULL)
+   {
+      pgmoneta_free_query_response(qr);
+   }
    return 1;
 }
 
-get_segment_size(SSL* ssl, int socket, int server, size_t* segsz)
+static int
+get_segment_size(SSL * ssl, int socket, int server, size_t* segsz)
 {
    int q = 0;
    bool mb = true;
