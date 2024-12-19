@@ -39,6 +39,7 @@
 static int cleanup_setup(int, char*, struct deque*);
 static int cleanup_execute_restore(int, char*, struct deque*);
 static int cleanup_teardown(int, char*, struct deque*);
+static int cleanup_execute_restore_incremental(int, char*, struct deque*);
 
 struct workflow*
 pgmoneta_create_cleanup(int type)
@@ -58,6 +59,8 @@ pgmoneta_create_cleanup(int type)
       case CLEANUP_TYPE_RESTORE:
          wf->execute = &cleanup_execute_restore;
          break;
+      case CLEANUP_TYPE_RESTORE_INCREMENTAL:
+         wf->execute = &cleanup_execute_restore_incremental;
       default:
          pgmoneta_log_error("Invalid cleanup type");
    }
@@ -126,5 +129,14 @@ cleanup_teardown(int server, char* identifier, struct deque* nodes)
    pgmoneta_log_debug("Cleanup (teardown): %s/%s", config->servers[server].name, identifier);
    pgmoneta_deque_list(nodes);
 
+   return 0;
+}
+
+static int
+cleanup_execute_restore_incremental(int server, char* identifier, struct deque* nodes)
+{
+   char* directory_incremental = NULL;
+   directory_incremental = (char*)pgmoneta_deque_get(nodes, NODE_DIRECTORY);
+   pgmoneta_delete_directory(directory_incremental);
    return 0;
 }

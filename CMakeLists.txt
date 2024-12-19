@@ -78,7 +78,7 @@ if(COMPILER_SUPPORTS_SSE42)
   #include <cpuid.h>
   #include <x86intrin.h>
   #endif  // defined(_MSC_VER)
-  
+
   int main() {
     _mm_crc32_u8(0, 0); _mm_crc32_u32(0, 0);
   #if defined(_M_X64) || defined(__x86_64__)

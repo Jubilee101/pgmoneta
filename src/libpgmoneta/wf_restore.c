@@ -46,6 +46,14 @@ static int restore_setup(int, char*, struct deque*);
 static int restore_execute(int, char*, struct deque*);
 static int restore_teardown(int, char*, struct deque*);
 
+static int combine_incremental_setup(int, char*, struct deque*);
+static int combine_incremental_execute(int, char*, struct deque*);
+static int combine_incremental_teardown(int, char*, struct deque*);
+
+static int batch_restore_relay_setup(int, char*, struct deque*);
+static int batch_restore_relay_execute(int, char*, struct deque*);
+static int batch_restore_relay_teardown(int, char*, struct deque*);
+
 static int recovery_info_setup(int, char*, struct deque*);
 static int recovery_info_execute(int, char*, struct deque*);
 static int recovery_info_teardown(int, char*, struct deque*);
@@ -72,6 +80,46 @@ pgmoneta_create_restore(void)
    wf->setup = &restore_setup;
    wf->execute = &restore_execute;
    wf->teardown = &restore_teardown;
+   wf->next = NULL;
+
+   return wf;
+}
+
+struct workflow*
+pgmoneta_create_combine_incremental(void)
+{
+   struct workflow* wf = NULL;
+
+   wf = (struct workflow*)malloc(sizeof(struct workflow));
+
+   if (wf == NULL)
+   {
+      return NULL;
+   }
+
+   wf->setup = &combine_incremental_setup;
+   wf->execute = &combine_incremental_execute;
+   wf->teardown = &combine_incremental_teardown;
+   wf->next = NULL;
+
+   return wf;
+}
+
+struct workflow*
+pgmoneta_create_batch_restore_relay(void)
+{
+   struct workflow* wf = NULL;
+
+   wf = (struct workflow*)malloc(sizeof(struct workflow));
+
+   if (wf == NULL)
+   {
+      return NULL;
+   }
+
+   wf->setup = &batch_restore_relay_setup;
+   wf->execute = &batch_restore_relay_execute;
+   wf->teardown = &batch_restore_relay_teardown;
    wf->next = NULL;
 
    return wf;
@@ -335,6 +383,167 @@ restore_teardown(int server, char* identifier, struct deque* nodes)
    config = (struct configuration*)shmem;
 
    pgmoneta_log_debug("Restore (teardown): %s/%s", config->servers[server].name, identifier);
+   pgmoneta_deque_list(nodes);
+
+   return 0;
+}
+
+static int
+combine_incremental_setup(int server, char* identifier, struct deque* nodes)
+{
+   struct configuration* config;
+
+   config = (struct configuration*)shmem;
+
+   pgmoneta_log_debug("Combine incremental (setup): %s/%s", config->servers[server].name, identifier);
+   pgmoneta_deque_list(nodes);
+
+   return 0;
+}
+
+static int
+combine_incremental_execute(int server, char* identifier, struct deque* nodes)
+{
+   struct deque* prior_backups = NULL;
+   char* input_dir = NULL;
+   char* output_dir = NULL;
+   // struct configuration* config;
+   //
+   // config = (struct configuration*)shmem;
+
+   prior_backups = (struct deque*)pgmoneta_deque_get(nodes, NODE_BACKUPS);
+   if (prior_backups == NULL || pgmoneta_deque_size(prior_backups) < 2)
+   {
+      pgmoneta_log_error("Combine incremental: should have at least 2 backups");
+      goto error;
+   }
+   input_dir = (char*)pgmoneta_deque_poll(prior_backups, NULL);
+   output_dir = (char*)pgmoneta_deque_get(nodes, NODE_COMBINE);
+   if (output_dir == NULL || strlen(output_dir) == 0)
+   {
+      pgmoneta_log_error("Combine incremental: reconstruction output directory should not be empty");
+      goto error;
+   }
+   if (pgmoneta_mkdir(output_dir))
+   {
+      pgmoneta_log_error("Combine incremental: Unable to create directory %s", output_dir);
+   }
+
+   if (pgmoneta_combine_backups(server, input_dir, output_dir, prior_backups))
+   {
+      goto error;
+   }
+
+   free(input_dir);
+   return 0;
+
+error:
+   free(input_dir);
+   return 1;
+}
+
+static int
+combine_incremental_teardown(int server, char* identifier, struct deque* nodes)
+{
+   struct configuration* config;
+
+   config = (struct configuration*)shmem;
+
+   pgmoneta_log_debug("Combine incremental (teardown): %s/%s", config->servers[server].name, identifier);
+   pgmoneta_deque_list(nodes);
+
+   return 0;
+}
+
+static int
+batch_restore_relay_setup(int server, char* identifier, struct deque* nodes)
+{
+   struct configuration* config;
+
+   config = (struct configuration*)shmem;
+
+   pgmoneta_log_debug("Batch restore relay (setup): %s", config->servers[server].name);
+   pgmoneta_deque_list(nodes);
+
+   return 0;
+}
+
+static int
+batch_restore_relay_execute(int server, char* identifier, struct deque* nodes)
+{
+   struct deque* prior_backups = NULL;
+   char* label = NULL;
+   struct backup* bck = NULL;
+   struct deque_iterator* iter = NULL;
+   struct configuration* config;
+   char* server_dir = pgmoneta_get_server_backup(server);
+
+   config = (struct configuration*)shmem;
+
+   pgmoneta_log_trace("Batch restore relay (execute): %s/%s", config->servers[server].name, identifier);
+
+   label = (char*) pgmoneta_deque_get(nodes, NODE_LABEL);
+
+   // This isn't ideal because we have read the backup info previously when constructing the workflow,
+   // but for now we have no choice but to read a second time
+   if (pgmoneta_get_backup(server_dir, label, &bck))
+   {
+      goto error;
+   }
+
+   prior_backups = (struct deque*)pgmoneta_deque_get(nodes, NODE_BACKUPS);
+   if (prior_backups == NULL)
+   {
+      pgmoneta_deque_create(false, &prior_backups);
+      pgmoneta_deque_add(nodes, NODE_BACKUPS, (uintptr_t)prior_backups, ValueDeque);
+   }
+
+   pgmoneta_deque_add(prior_backups, NULL, pgmoneta_deque_get(nodes, NODE_DESTINATION), ValueString);
+
+   pgmoneta_deque_iterator_create(nodes, &iter);
+   while (pgmoneta_deque_iterator_next(iter))
+   {
+      // Keep the directory, position, prior_backups
+      // since they'll remain unchanged. Purge the rest in case they unexpectedly
+      // affect the next restore workflow
+      if (pgmoneta_compare_string(iter->tag, NODE_DIRECTORY) ||
+          pgmoneta_compare_string(iter->tag, NODE_POSITION) ||
+          pgmoneta_compare_string(iter->tag, NODE_BACKUPS) ||
+          pgmoneta_compare_string(iter->tag, NODE_COMBINE))
+      {
+         continue;
+      }
+      pgmoneta_deque_iterator_remove(iter);
+   }
+
+   // restore stops at full backup
+   if (bck->type != TYPE_FULL)
+   {
+      pgmoneta_deque_add(nodes, NODE_LABEL, (uintptr_t)bck->parent_label, ValueString);
+   }
+
+   // free the label since adding to deque makes a copy of it
+   free(bck);
+   free(server_dir);
+   pgmoneta_deque_iterator_destroy(iter);
+
+   return 0;
+
+error:
+   free(bck);
+   free(server_dir);
+   pgmoneta_deque_iterator_destroy(iter);
+   return 1;
+}
+
+static int
+batch_restore_relay_teardown(int server, char* identifier, struct deque* nodes)
+{
+   struct configuration* config;
+
+   config = (struct configuration*)shmem;
+
+   pgmoneta_log_debug("Batch restore relay (teardown): %s", config->servers[server].name);
    pgmoneta_deque_list(nodes);
 
    return 0;
