@@ -135,8 +135,6 @@ find_package(Podman)
 if (DOCKER_FOUND OR PODMAN_FOUND)
   set(container TRUE)
   message(STATUS "Docker or podman found")
-else ()
-  message(STATUS "Docker or podman needed. The test suite will be skipped.")
 endif()
 
 if (DOCS)

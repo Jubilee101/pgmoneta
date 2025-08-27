@@ -59,16 +59,6 @@ USER=$(whoami)
 MODE="dev"
 PORT=6432
 
-# Detect container engine: Docker or Podman
-if command -v docker &> /dev/null; then
-  CONTAINER_ENGINE="sudo docker"
-elif command -v podman &> /dev/null; then
-  CONTAINER_ENGINE="podman"
-else
-  echo "Neither Docker nor Podman is installed. Please install one to proceed."
-  exit 1
-fi
-
 if [ -n "$PGMONETA_TEST_PORT" ]; then
     PORT=$PGMONETA_TEST_PORT
 fi
@@ -214,12 +204,12 @@ start_postgresql() {
   set +e
   sudo rm -Rf /conf /pgconf /pgdata /pgwal
   sudo cp -R $TEST_PG17_DIRECTORY/root /
-  sudo ls /root
+  sudo ls -l /root/usr/bin/
   sudo mkdir -p /conf /pgconf /pgdata /pgwal /pglog
   sudo cp -R $TEST_PG17_DIRECTORY/conf/* /conf/
-  sudo ls /conf
-  sudo chown -R postgres:postgres /conf /pgconf /pgdata /pgwal /pglog
+  sudo chown -R postgres:postgres /conf /pgconf /pgdata /pgwal /pglog /root
   sudo chmod -R 777 /conf /pgconf /pgdata /pgwal /pglog /root
+  sudo ls -l /root/usr/bin/
   sudo chmod +x /root/usr/bin/run-postgresql-local
   sudo mkdir -p /root/usr/local/bin
 
@@ -229,8 +219,8 @@ start_postgresql() {
   export PG_USER_PASSWORD=${PG_USER_PASSWORD}
   export PG_REPL_USER_NAME=${PG_REPL_USER_NAME}
   export PG_REPL_PASSWORD=${PG_REPL_PASSWORD}
-
-  sudo -E -u postgres /root/usr/bin/run-postgresql-local
+  echo "Postgres binaries installed in $PG_BIN"
+  sudo -E -u postgres $(which bash) /root/usr/bin/run-postgresql-local
   set -e
 }
 
@@ -420,5 +410,14 @@ elif [[ $# -eq 1 ]]; then
 else
    # If no arguments are provided, run function_without_param
    trap cleanup EXIT SIGINT
+   # Detect container engine: Docker or Podman
+   if command -v docker &> /dev/null; then
+     CONTAINER_ENGINE="sudo docker"
+   elif command -v podman &> /dev/null; then
+     CONTAINER_ENGINE="podman"
+   else
+     echo "Neither Docker nor Podman is installed. Please install one to proceed."
+     exit 1
+   fi
    run_tests
 fi

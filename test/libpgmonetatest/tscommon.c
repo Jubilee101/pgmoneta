@@ -72,6 +72,7 @@ pgmoneta_test_environment_create(void)
     // Create the shared memory for the configuration
     size = sizeof(struct main_configuration);
     assert(!pgmoneta_create_shared_memory(size, HUGEPAGE_OFF, &shmem));
+    assert(shmem != NULL);
 
     pgmoneta_init_main_configuration(shmem);
 

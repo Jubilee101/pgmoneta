@@ -33,28 +33,34 @@ export PG_EFFECTIVE_CACHE_SIZE=${PG_EFFECTIVE_CACHE_SIZE:-4GB}
 export PG_MAX_WAL_SIZE=${PG_MAX_WAL_SIZE:-1GB}
 export PG_LOG_LEVEL=${PG_LOG_LEVEL:-debug5}
 
-/usr/lib/postgresql/17/bin/initdb -k -X /pgwal/ /pgdata/
+$PG_BIN/initdb -k -X /pgwal/ /pgdata/
 
-sed -i "s/PG_MAX_CONNECTIONS/$PG_MAX_CONNECTIONS/g" /conf/postgresql.conf
-sed -i "s/PG_SHARED_BUFFERS/$PG_SHARED_BUFFERS/g" /conf/postgresql.conf
-sed -i "s/PG_WORK_MEM/$PG_WORK_MEM/g" /conf/postgresql.conf
-sed -i "s/PG_MAX_PARALLEL_WORKERS/$PG_MAX_PARALLEL_WORKERS/g" /conf/postgresql.conf
-sed -i "s/PG_EFFECTIVE_CACHE_SIZE/$PG_EFFECTIVE_CACHE_SIZE/g" /conf/postgresql.conf
-sed -i "s/PG_MAX_WAL_SIZE/$PG_MAX_WAL_SIZE/g" /conf/postgresql.conf
-sed -i "s/PG_LOG_LEVEL/$PG_LOG_LEVEL/g" /conf/postgresql.conf
+SED=sed
+if command -v gsed >/dev/null 2>&1; then
+    echo "Alias sed to gsed for the current shell"
+    SED=gsed
+fi
 
-sed -i "s/PG_DATABASE/$PG_DATABASE/g" /conf/pg_hba.conf
-sed -i "s/PG_USER_NAME/$PG_USER_NAME/g" /conf/pg_hba.conf
-sed -i "s/PG_REPL_USER_NAME/$PG_REPL_USER_NAME/g" /conf/pg_hba.conf
+$SED -i "s/PG_MAX_CONNECTIONS/$PG_MAX_CONNECTIONS/g" /conf/postgresql.conf
+$SED -i "s/PG_SHARED_BUFFERS/$PG_SHARED_BUFFERS/g" /conf/postgresql.conf
+$SED -i "s/PG_WORK_MEM/$PG_WORK_MEM/g" /conf/postgresql.conf
+$SED -i "s/PG_MAX_PARALLEL_WORKERS/$PG_MAX_PARALLEL_WORKERS/g" /conf/postgresql.conf
+$SED -i "s/PG_EFFECTIVE_CACHE_SIZE/$PG_EFFECTIVE_CACHE_SIZE/g" /conf/postgresql.conf
+$SED -i "s/PG_MAX_WAL_SIZE/$PG_MAX_WAL_SIZE/g" /conf/postgresql.conf
+$SED -i "s/PG_LOG_LEVEL/$PG_LOG_LEVEL/g" /conf/postgresql.conf
+
+$SED -i "s/PG_DATABASE/$PG_DATABASE/g" /conf/pg_hba.conf
+$SED -i "s/PG_USER_NAME/$PG_USER_NAME/g" /conf/pg_hba.conf
+$SED -i "s/PG_REPL_USER_NAME/$PG_REPL_USER_NAME/g" /conf/pg_hba.conf
 
 cp /conf/postgresql.conf /pgdata/
 cp /conf/pg_hba.conf /pgdata/
 
-sed -i "s/PG_DATABASE/$PG_DATABASE/g" /conf/setup.sql
-sed -i "s/PG_USER_NAME/$PG_USER_NAME/g" /conf/setup.sql
-sed -i "s/PG_USER_PASSWORD/$PG_USER_PASSWORD/g" /conf/setup.sql
-sed -i "s/PG_REPL_USER_NAME/$PG_REPL_USER_NAME/g" /conf/setup.sql
-sed -i "s/PG_REPL_PASSWORD/$PG_REPL_PASSWORD/g" /conf/setup.sql
+$SED -i "s/PG_DATABASE/$PG_DATABASE/g" /conf/setup.sql
+$SED -i "s/PG_USER_NAME/$PG_USER_NAME/g" /conf/setup.sql
+$SED -i "s/PG_USER_PASSWORD/$PG_USER_PASSWORD/g" /conf/setup.sql
+$SED -i "s/PG_REPL_USER_NAME/$PG_REPL_USER_NAME/g" /conf/setup.sql
+$SED -i "s/PG_REPL_PASSWORD/$PG_REPL_PASSWORD/g" /conf/setup.sql
 
-/usr/lib/postgresql/17/bin/pg_ctl -D /pgdata/ start
-/usr/lib/postgresql/17/bin/psql -q -h /tmp -f /conf/setup.sql postgres
+$PG_BIN/pg_ctl -D /pgdata/ start
+$PG_BIN/psql -q -h /tmp -f /conf/setup.sql postgres
