@@ -170,6 +170,8 @@ extern "C" {
 
 #define INCREMENTAL_PREFIX           "INCREMENTAL."
 
+#define TOOL_PGBACKREST              1
+
 #define likely(x)                    __builtin_expect(!!(x), 1)
 #define unlikely(x)                  __builtin_expect(!!(x), 0)
 
@@ -558,6 +560,23 @@ struct walinfo_configuration
 struct walfilter_configuration
 {
    struct common_configuration common; /**< Common configurations that are shared across multiple tools */
+} __attribute__((aligned(64)));
+
+/** @struct muse_configuration
+ * Defines the muse configuration to migrate the backup(s)
+ */
+struct muse_configuration
+{
+   struct common_configuration common;
+   char base_dir[MAX_PATH];                /**< The target base directory */
+   int source_encryption;                  /**< The encryption method of source backup */
+   char source_cipher[MAX_PASSWORD_CHARS]; /**< The source cipher password for encryption */
+   int source_compression;                 /**< The compression method of source backup */
+   int source_tool;                        /**< The source tool */
+   int encryption;                         /**< The encryption method of migrated backup */
+   int compression;                        /**< The compression method of migrated backup */
+   int compression_level;                  /**< The compression level of migrated backup */
+   int output_format;                      /**< Default output format for the outcome */
 } __attribute__((aligned(64)));
 
 #ifdef __cplusplus

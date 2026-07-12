@@ -2271,7 +2271,7 @@ pgmoneta_read_cli_configuration(void* shmem, char* filename)
             {
                if (as_management_compression(value, &config->compression))
                {
-                  warnx("Unknown management compression: %s", value);
+                  warnx("Unknown management compression mode: %s", value);
                }
             }
             else if (pgmoneta_compare_string(key, CONFIGURATION_ARGUMENT_ENCRYPTION))
@@ -2347,6 +2347,266 @@ pgmoneta_validate_cli_configuration(void* shmem)
          config->encryption = MANAGEMENT_ENCRYPTION_NONE;
    }
 
+   return 0;
+}
+
+int
+pgmoneta_init_muse_configuration(void* shmem)
+{
+   struct muse_configuration* config;
+   char* home_dir = NULL;
+
+   config = (struct muse_configuration*)shmem;
+
+   home_dir = pgmoneta_get_home_directory();
+   memcpy(&config->common.home_dir, home_dir, strlen(home_dir));
+
+   config->common.log_type = PGMONETA_LOGGING_TYPE_CONSOLE;
+   config->common.log_level = PGMONETA_LOGGING_LEVEL_INFO;
+   config->common.log_mode = PGMONETA_LOGGING_MODE_APPEND;
+   atomic_init(&config->common.log_lock, STATE_FREE);
+
+   config->source_compression = MANAGEMENT_COMPRESSION_UNKNOWN;
+   config->source_encryption = MANAGEMENT_ENCRYPTION_UNKNOWN;
+   config->compression = MANAGEMENT_COMPRESSION_UNKNOWN;
+   config->encryption = MANAGEMENT_ENCRYPTION_UNKNOWN;
+   config->compression_level = 3;
+   config->source_tool = 0;
+
+   free(home_dir);
+
+   return 0;
+}
+
+int
+pgmoneta_read_muse_configuration(void* shmem, char* filename)
+{
+   FILE* file;
+   char line[LINE_LENGTH];
+   char* trimmed_line = NULL;
+   char* key = NULL;
+   char* value = NULL;
+   size_t max;
+   struct muse_configuration* config;
+
+   file = fopen(filename, "r");
+
+   if (!file)
+   {
+      goto error;
+   }
+
+   config = (struct muse_configuration*)shmem;
+
+   while (fgets(line, sizeof(line), file))
+   {
+      if (!is_empty_string(line))
+      {
+         if (!remove_leading_whitespace_and_comments(line, &trimmed_line))
+         {
+            if (is_empty_string(trimmed_line))
+            {
+               free(trimmed_line);
+               trimmed_line = NULL;
+               continue;
+            }
+         }
+         else
+         {
+            free(trimmed_line);
+            trimmed_line = NULL;
+            continue;
+         }
+
+         /* Skip section markers */
+         if (trimmed_line[0] == '[')
+         {
+            free(trimmed_line);
+            trimmed_line = NULL;
+            continue;
+         }
+
+         /* Extract and process all key-value pairs */
+         if (pgmoneta_starts_with(trimmed_line, CONFIGURATION_ARGUMENT_LOG_PATH) ||
+             pgmoneta_starts_with(trimmed_line, CONFIGURATION_ARGUMENT_UNIX_SOCKET_DIR))
+         {
+            extract_syskey_value(trimmed_line, &key, &value);
+         }
+         else
+         {
+            extract_key_value(trimmed_line, &key, &value);
+         }
+
+         if (key && value)
+         {
+            if (pgmoneta_compare_string(key, CONFIGURATION_ARGUMENT_LOG_TYPE))
+            {
+               config->common.log_type = as_logging_type(value);
+            }
+            else if (pgmoneta_compare_string(key, CONFIGURATION_ARGUMENT_LOG_LEVEL))
+            {
+               config->common.log_level = as_logging_level(value);
+            }
+            else if (pgmoneta_compare_string(key, CONFIGURATION_ARGUMENT_LOG_PATH))
+            {
+               max = strlen(value);
+               if (max > MISC_LENGTH - 1)
+               {
+                  max = MISC_LENGTH - 1;
+               }
+               memcpy(config->common.log_path, value, max);
+            }
+            else if (pgmoneta_compare_string(key, CONFIGURATION_ARGUMENT_LOG_MODE))
+            {
+               config->common.log_mode = as_logging_mode(value);
+            }
+            else if (pgmoneta_compare_string(key, CONFIGURATION_ARGUMENT_COMPRESSION))
+            {
+               if (as_management_compression(value, &config->compression))
+               {
+                  warnx("Unknown management compression mode: %s", value);
+                  goto error;
+               }
+            }
+            else if (pgmoneta_compare_string(key, CONFIGURATION_ARGUMENT_ENCRYPTION))
+            {
+               if (as_management_encryption(value, &config->encryption))
+               {
+                  warnx("Unknown management encryption mode: %s", value);
+                  goto error;
+               }
+            }
+            else if (pgmoneta_compare_string(key, CONFIGURATION_ARGUMENT_COMPRESSION_LEVEL))
+            {
+               if (as_int(value, &config->compression_level))
+               {
+                  warnx("Unknown management encryption level: %s", value);
+                  goto error;
+               }
+            }
+            else if (pgmoneta_compare_string(key, CONFIGURATION_SOURCE_CIPHER))
+            {
+               max = strlen(value);
+               if (max > MAX_PASSWORD_LENGTH - 1)
+               {
+                  warnx("Cipher length of %d exceeds %d", (int)max, MAX_PASSWORD_LENGTH);
+                  goto error;
+               }
+               memcpy(config->source_cipher, value, max);
+            }
+            else if (pgmoneta_compare_string(key, CONFIGURATION_ARGUMENT_BASE_DIR))
+            {
+               max = strlen(value);
+               if (max > MAX_PATH - 1)
+               {
+                  warnx("Base directory length of %d exceeds %d", (int)max, MAX_PATH);
+                  goto error;
+               }
+               memcpy(config->base_dir, value, max);
+            }
+            else if (pgmoneta_compare_string(key, CONFIGURATION_SOURCE_ENCRYPTION))
+            {
+               if (as_management_encryption(value, &config->source_encryption))
+               {
+                  warnx("Unknown source encryption mode: %s", value);
+                  goto error;
+               }
+            }
+            else if (pgmoneta_compare_string(key, CONFIGURATION_SOURCE_COMPRESSION))
+            {
+               if (as_management_compression(value, &config->source_compression))
+               {
+                  warnx("Unknown source compression mode: %s", value);
+                  goto error;
+               }
+            }
+            else if (pgmoneta_compare_string(key, CONFIGURATION_SOURCE_TOOL))
+            {
+               if (pgmoneta_compare_string(value, "pgbackrest"))
+               {
+                  config->source_tool = TOOL_PGBACKREST;
+               }
+               else
+               {
+                  warnx("Unknown source tool: %s, support \"pgbackrest\"", value);
+                  goto error;
+               }
+            }
+         }
+
+         free(key);
+         free(value);
+         key = NULL;
+         value = NULL;
+      }
+      else
+      {
+         warnx("Unknown line format: %s", line);
+      }
+      free(trimmed_line);
+      trimmed_line = NULL;
+   }
+
+   fclose(file);
+
+   return 0;
+
+error:
+   if (file != NULL)
+   {
+      fclose(file);
+   }
+   free(trimmed_line);
+   free(key);
+   free(value);
+   return 1;
+}
+
+int
+pgmoneta_validate_muse_configuration(void* shmem, char* source_directory)
+{
+   struct muse_configuration* config = NULL;
+
+   config = (struct muse_configuration*)shmem;
+   if (strlen(config->base_dir) == 0 || !pgmoneta_exists(config->base_dir) || !pgmoneta_is_directory(config->base_dir))
+   {
+      pgmoneta_log_fatal("Unable to find base directory %s", config->base_dir);
+   }
+   if (config->compression == MANAGEMENT_COMPRESSION_UNKNOWN)
+   {
+      config->compression = MANAGEMENT_COMPRESSION_NONE;
+   }
+   if (config->source_compression == MANAGEMENT_COMPRESSION_UNKNOWN)
+   {
+      config->source_compression = MANAGEMENT_COMPRESSION_NONE;
+   }
+   if (config->encryption == MANAGEMENT_ENCRYPTION_UNKNOWN)
+   {
+      config->encryption = MANAGEMENT_ENCRYPTION_NONE;
+   }
+   if (config->source_encryption == MANAGEMENT_ENCRYPTION_UNKNOWN)
+   {
+      config->encryption = MANAGEMENT_ENCRYPTION_NONE;
+   }
+   if (config->source_encryption != MANAGEMENT_ENCRYPTION_NONE)
+   {
+      if (strlen(config->source_cipher) == 0)
+      {
+         pgmoneta_log_fatal("Source cipher must be specified when the backups are encrypted");
+      }
+   }
+   if (COMPRESSION_IS_SERVER(config->compression))
+   {
+      pgmoneta_log_fatal("Server side compression is not supported during migration");
+   }
+   if (config->source_tool == 0)
+   {
+      pgmoneta_log_fatal("Source backup tool must be specified");
+   }
+   if (pgmoneta_starts_with(config->base_dir, source_directory))
+   {
+      pgmoneta_log_fatal("Target base directory cannot be sub-directory of source repository");
+   }
    return 0;
 }
 
