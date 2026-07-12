@@ -1577,6 +1577,8 @@ type_allowed(enum value_type type)
       case ValueFloat:
       case ValueDouble:
       case ValueJSON:
+      case ValueJSONRef:
+      case ValueStringRef:
          return true;
       default:
          return false;
