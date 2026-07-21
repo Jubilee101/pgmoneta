@@ -32,6 +32,7 @@
 #include <configuration.h>
 #include <logging.h>
 #include <memory.h>
+#include <migration.h>
 #include <shmem.h>
 #include <utils.h>
 /* system */
@@ -40,16 +41,17 @@
 #include <getopt.h>
 #include <inttypes.h>
 #include <libgen.h>
+#include <time.h>
 
 static bool match_opt(char* optname, char* optshort, char* optlong);
 static void version(void);
 static void usage(void);
 static bool backup_exists(char* directory, char* backup_id);
+static void get_workspace(char* base, char** workspace);
 
 int
 main(int argc, char** argv)
 {
-   bool dry_run = false;
    int ret = 0;
    int num_options = 0;
    int num_results = 0;
@@ -59,7 +61,9 @@ main(int argc, char** argv)
    char* configuration_path = NULL;
    char* logfile = NULL;
    char* directory = NULL;
+   char* source_dir = NULL;
    char* server_name = NULL;
+   char* workspace = NULL;
 
    struct muse_configuration* config = NULL;
 
@@ -93,10 +97,6 @@ main(int argc, char** argv)
       if (optname == NULL)
       {
          break;
-      }
-      else if (match_opt(optname, "d", "dry-run"))
-      {
-         dry_run = true;
       }
       else if (match_opt(optname, "c", "config"))
       {
@@ -204,13 +204,35 @@ main(int argc, char** argv)
       memcpy(&config->common.log_path[0], logfile, MIN((size_t)MISC_LENGTH - 1, strlen(logfile)));
    }
 
+   get_workspace(config->workspace, &workspace);
+   if (pgmoneta_mkdir(workspace))
+   {
+      errx(1, "pgmoneta-muse: Unable to create workspace");
+   }
+
    if (pgmoneta_start_logging())
    {
       errx(1, "pgmoneta-muse: Unable to start logging");
    }
 
+   source_dir = pgmoneta_append(source_dir, directory);
+   if (!pgmoneta_ends_with(source_dir, "/"))
+   {
+      source_dir = pgmoneta_append(source_dir, "/");
+   }
+
+   if (pgmoneta_migrate(directory, backup_id, server_name, workspace))
+   {
+      pgmoneta_log_error("Failed to migrate source directory %s", directory);
+   }
+
    pgmoneta_stop_logging();
    pgmoneta_destroy_shared_memory(shmem, sizeof(struct muse_configuration));
+
+   pgmoneta_delete_directory(workspace);
+
+   free(source_dir);
+   free(workspace);
    return 0;
 }
 
@@ -235,11 +257,10 @@ usage(void)
    printf("\n");
 
    printf("Usage:\n");
-   printf("  pgmoneta-muse {-D DIRECTORY} {-s SERVER} [-i BACKUP_ID] [ -c CONFIG_FILE ] [ -d ]\n");
+   printf("  pgmoneta-muse {-D DIRECTORY} {-s SERVER} [-i BACKUP_ID] [ -c CONFIG_FILE ]\n");
    printf("\n");
    printf("Options:\n");
    printf("  -c, --config CONFIG_FILE  Set the path to the pgmoneta_muse.conf file\n");
-   printf("  -d, --dry-run             Dry run the migration process\n");
    printf("  -D, --directory DIRECTORY Set the path to the backup directory\n");
    printf("  -i, --backup-id BACKUP_ID When specified, only the corresponding backup in the directory will be migrated\n");
    printf("  -L, --logfile FILE        Set the log file\n");
@@ -266,4 +287,30 @@ backup_exists(char* directory, char* backup_id)
 
    free(path);
    return exists;
+}
+
+static void
+get_workspace(char* base, char** workspace)
+{
+   char* ws = NULL;
+   *workspace = NULL;
+   time_t curr_t;
+   struct tm* time_info;
+   char date_str[128];
+
+   curr_t = time(NULL);
+   memset(&date_str[0], 0, sizeof(date_str));
+   time_info = localtime(&curr_t);
+
+   strftime(&date_str[0], sizeof(date_str), "%Y%m%d%H%M%S", time_info);
+
+   ws = pgmoneta_append(ws, base);
+   if (!pgmoneta_ends_with(ws, "/"))
+   {
+      ws = pgmoneta_append(ws, "/");
+   }
+   ws = pgmoneta_append(ws, "muse_");
+   ws = pgmoneta_append(ws, &date_str[0]);
+   ws = pgmoneta_append(ws, "/");
+   *workspace = ws;
 }
