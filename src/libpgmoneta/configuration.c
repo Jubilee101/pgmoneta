@@ -76,6 +76,7 @@ static int as_compression(char* str);
 static int as_storage_engine(char* str);
 static char* as_ciphers(char* str);
 static int as_encryption_mode(char* str, int* encryption);
+static int as_compression_mode(char* str, int* compression);
 static int as_management_encryption(char* str, int* encryption);
 static int as_management_compression(char* str, int* compression);
 static int as_output_format(char* str);
@@ -2366,10 +2367,10 @@ pgmoneta_init_muse_configuration(void* shmem)
    config->common.log_mode = PGMONETA_LOGGING_MODE_APPEND;
    atomic_init(&config->common.log_lock, STATE_FREE);
 
-   config->source_compression = MANAGEMENT_COMPRESSION_UNKNOWN;
-   config->source_encryption = MANAGEMENT_ENCRYPTION_UNKNOWN;
-   config->compression = MANAGEMENT_COMPRESSION_UNKNOWN;
-   config->encryption = MANAGEMENT_ENCRYPTION_UNKNOWN;
+   config->source_compression = COMPRESSION_NONE;
+   config->source_encryption = ENCRYPTION_NONE;
+   config->compression = COMPRESSION_NONE;
+   config->encryption = ENCRYPTION_NONE;
    config->compression_level = 3;
    config->source_tool = 0;
 
@@ -2462,17 +2463,17 @@ pgmoneta_read_muse_configuration(void* shmem, char* filename)
             }
             else if (pgmoneta_compare_string(key, CONFIGURATION_ARGUMENT_COMPRESSION))
             {
-               if (as_management_compression(value, &config->compression))
+               if (as_compression_mode(value, &config->compression))
                {
-                  warnx("Unknown management compression mode: %s", value);
+                  warnx("Unknown compression mode: %s", value);
                   goto error;
                }
             }
             else if (pgmoneta_compare_string(key, CONFIGURATION_ARGUMENT_ENCRYPTION))
             {
-               if (as_management_encryption(value, &config->encryption))
+               if (as_encryption_mode(value, &config->encryption))
                {
-                  warnx("Unknown management encryption mode: %s", value);
+                  warnx("Unknown encryption mode: %s", value);
                   goto error;
                }
             }
@@ -2480,7 +2481,7 @@ pgmoneta_read_muse_configuration(void* shmem, char* filename)
             {
                if (as_int(value, &config->compression_level))
                {
-                  warnx("Unknown management encryption level: %s", value);
+                  warnx("Unknown encryption level: %s", value);
                   goto error;
                }
             }
@@ -2506,15 +2507,22 @@ pgmoneta_read_muse_configuration(void* shmem, char* filename)
             }
             else if (pgmoneta_compare_string(key, CONFIGURATION_SOURCE_ENCRYPTION))
             {
-               if (as_management_encryption(value, &config->source_encryption))
+               if (as_encryption_mode(value, &config->source_encryption))
                {
-                  warnx("Unknown source encryption mode: %s", value);
-                  goto error;
+                  if (!strcasecmp(value, "aes-256-cbc"))
+                  {
+                     config->source_encryption = ENCRYPTION_AES_256_CBC;
+                  }
+                  else
+                  {
+                     warnx("Unknown source encryption mode: %s", value);
+                     goto error;
+                  }
                }
             }
             else if (pgmoneta_compare_string(key, CONFIGURATION_SOURCE_COMPRESSION))
             {
-               if (as_management_compression(value, &config->source_compression))
+               if (as_compression_mode(value, &config->source_compression))
                {
                   warnx("Unknown source compression mode: %s", value);
                   goto error;
@@ -2532,6 +2540,16 @@ pgmoneta_read_muse_configuration(void* shmem, char* filename)
                   goto error;
                }
             }
+            else if (pgmoneta_compare_string(key, CONFIGURATION_ARGUMENT_WORKSPACE))
+            {
+               max = strlen(value);
+               if (max > MAX_PATH - 1)
+               {
+                  warnx("Workspace directory length of %d exceeds %d", (int)max, MAX_PATH);
+                  goto error;
+               }
+               memcpy(config->workspace, value, max);
+            }
          }
 
          free(key);
@@ -2545,6 +2563,11 @@ pgmoneta_read_muse_configuration(void* shmem, char* filename)
       }
       free(trimmed_line);
       trimmed_line = NULL;
+   }
+
+   if (strlen(config->workspace) == 0)
+   {
+      memcpy(config->workspace, WORKSPACE_DEFAULT, strlen(WORKSPACE_DEFAULT));
    }
 
    fclose(file);
@@ -2572,27 +2595,19 @@ pgmoneta_validate_muse_configuration(void* shmem, char* source_directory)
    {
       pgmoneta_log_fatal("Unable to find base directory %s", config->base_dir);
    }
-   if (config->compression == MANAGEMENT_COMPRESSION_UNKNOWN)
-   {
-      config->compression = MANAGEMENT_COMPRESSION_NONE;
-   }
-   if (config->source_compression == MANAGEMENT_COMPRESSION_UNKNOWN)
-   {
-      config->source_compression = MANAGEMENT_COMPRESSION_NONE;
-   }
-   if (config->encryption == MANAGEMENT_ENCRYPTION_UNKNOWN)
-   {
-      config->encryption = MANAGEMENT_ENCRYPTION_NONE;
-   }
-   if (config->source_encryption == MANAGEMENT_ENCRYPTION_UNKNOWN)
-   {
-      config->encryption = MANAGEMENT_ENCRYPTION_NONE;
-   }
-   if (config->source_encryption != MANAGEMENT_ENCRYPTION_NONE)
+   if (config->source_encryption != ENCRYPTION_NONE)
    {
       if (strlen(config->source_cipher) == 0)
       {
          pgmoneta_log_fatal("Source cipher must be specified when the backups are encrypted");
+      }
+
+      if (config->source_tool == TOOL_PGBACKREST)
+      {
+         if (config->source_compression != ENCRYPTION_AES_256_CBC)
+         {
+            pgmoneta_log_fatal("pgBackRest only supports aes-256-cbc");
+         }
       }
    }
    if (COMPRESSION_IS_SERVER(config->compression))
@@ -6170,6 +6185,60 @@ as_encryption_mode(char* str, int* encryption)
    if (!strcasecmp(str, "aes-128") || !strcasecmp(str, "aes-128-gcm"))
    {
       *encryption = ENCRYPTION_AES_128_GCM;
+      return 0;
+   }
+
+   return 1;
+}
+
+static int
+as_compression_mode(char* str, int* compression)
+{
+   if (!strcasecmp(str, "none"))
+   {
+      *compression = COMPRESSION_NONE;
+      return 0;
+   }
+
+   if (!strcasecmp(str, "gzip") || !strcasecmp(str, "client-gzip"))
+   {
+      *compression = COMPRESSION_CLIENT_GZIP;
+      return 0;
+   }
+
+   if (!strcasecmp(str, "server-gzip"))
+   {
+      *compression = COMPRESSION_SERVER_GZIP;
+      return 0;
+   }
+
+   if (!strcasecmp(str, "zstd") || !strcasecmp(str, "client-zstd"))
+   {
+      *compression = COMPRESSION_CLIENT_ZSTD;
+      return 0;
+   }
+
+   if (!strcasecmp(str, "server-zstd"))
+   {
+      *compression = COMPRESSION_SERVER_ZSTD;
+      return 0;
+   }
+
+   if (!strcasecmp(str, "lz4") || !strcasecmp(str, "client-lz4"))
+   {
+      *compression = COMPRESSION_CLIENT_LZ4;
+      return 0;
+   }
+
+   if (!strcasecmp(str, "server-lz4"))
+   {
+      *compression = COMPRESSION_SERVER_LZ4;
+      return 0;
+   }
+
+   if (!strcasecmp(str, "bz2") || !strcasecmp(str, "client-bz2"))
+   {
+      *compression = COMPRESSION_CLIENT_BZIP2;
       return 0;
    }
 

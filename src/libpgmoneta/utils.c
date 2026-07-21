@@ -4079,7 +4079,7 @@ pgmoneta_get_server_workspace(int server)
    }
    else
    {
-      ws = pgmoneta_append(ws, "/tmp/pgmoneta-workspace/");
+      ws = pgmoneta_append(ws, WORKSPACE_DEFAULT);
    }
 
    if (!pgmoneta_exists(ws))
