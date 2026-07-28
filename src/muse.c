@@ -146,6 +146,10 @@ main(int argc, char** argv)
          errx(1, "Unable to find backup %s at %s", backup_id, directory);
       }
    }
+   else
+   {
+      errx(1, "Must specify the ending backup");
+   }
 
    if (server_name == NULL)
    {
@@ -229,7 +233,8 @@ main(int argc, char** argv)
    pgmoneta_stop_logging();
    pgmoneta_destroy_shared_memory(shmem, sizeof(struct muse_configuration));
 
-   pgmoneta_delete_directory(workspace);
+   // TODO: uncomment to cleanup
+   // pgmoneta_delete_directory(workspace);
 
    free(source_dir);
    free(workspace);
@@ -257,12 +262,12 @@ usage(void)
    printf("\n");
 
    printf("Usage:\n");
-   printf("  pgmoneta-muse {-D DIRECTORY} {-s SERVER} [-i BACKUP_ID] [ -c CONFIG_FILE ]\n");
+   printf("  pgmoneta-muse {-D DIRECTORY} {-s SERVER} {-i BACKUP_ID} [ -c CONFIG_FILE ]\n");
    printf("\n");
    printf("Options:\n");
    printf("  -c, --config CONFIG_FILE  Set the path to the pgmoneta_muse.conf file\n");
    printf("  -D, --directory DIRECTORY Set the path to the backup directory\n");
-   printf("  -i, --backup-id BACKUP_ID When specified, only the corresponding backup in the directory will be migrated\n");
+   printf("  -i, --backup-id BACKUP_ID The final backup in the backup chain, all backups in the chain will be migrated\n");
    printf("  -L, --logfile FILE        Set the log file\n");
    printf("  -s, --server SERVER       Set the target server name the backups correspond to post migration");
    printf("  -V, --version             Display version information\n");
