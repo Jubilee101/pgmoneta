@@ -33,9 +33,11 @@
 #include <logging.h>
 #include <migration.h>
 #include <utils.h>
+#include <value.h>
 
 // system
 #include <assert.h>
+#include <errno.h>
 #include <stdio.h>
 #include <time.h>
 
@@ -57,10 +59,12 @@ struct pgbackrest_backup_info
    int type;
 };
 
-static int decrypt_backup_info(char* source_dir, char* workspace);
+static int load_backup_info(char* source_dir, char* workspace, char** cipher, struct art** backup_info);
 static void build_target_dir(char* source_dir, char* server, char** target_dir);
 static int migrate_pgbackrest(char* source_dir, char* backup_id, char* server, char* workspace);
 
+static int parse_pgbackrest_backup_info(char* path, char** cipher, struct art** backups);
+static int insert_pgbackrest_backup_info(char* backup_id, struct pgbackrest_backup_info* backup, struct art* backups);
 static int pgbackrest_backup_info_create(char* backup_id, struct json* info, struct pgbackrest_backup_info** backup);
 static void pgbackrest_backup_info_destroy(struct pgbackrest_backup_info* backup);
 static void pgbackrest_backup_info_destroy_cb(uintptr_t data);
@@ -82,6 +86,8 @@ static int
 migrate_pgbackrest(char* source_dir, char* backup_id, char* server, char* workspace)
 {
    char* target_dir = NULL;
+   char* cipher = NULL;
+   struct art* backups = NULL;
    // struct muse_configuration* config = NULL;
 
    // config = (struct muse_configuration*)shmem;
@@ -94,22 +100,25 @@ migrate_pgbackrest(char* source_dir, char* backup_id, char* server, char* worksp
       pgmoneta_log_error("Failed to create target directory at %s", target_dir);
       goto error;
    }
-   if (decrypt_backup_info(source_dir, workspace))
+   if (load_backup_info(source_dir, workspace, &cipher, &backups))
    {
-      pgmoneta_log_error("Failed to decrypt backup info");
+      pgmoneta_log_error("Failed to load backup info");
    }
-
+   free(cipher);
    free(target_dir);
+   pgmoneta_art_destroy(backups);
    return 0;
 
 error:
    pgmoneta_delete_directory(target_dir);
    free(target_dir);
+   free(cipher);
+   pgmoneta_art_destroy(backups);
    return 1;
 }
 
 static int
-decrypt_backup_info(char* source_dir, char* workspace)
+load_backup_info(char* source_dir, char* workspace, char** cipher, struct art** backups)
 {
    char* backup_info_path = NULL;
    char* dest = NULL;
@@ -137,6 +146,12 @@ decrypt_backup_info(char* source_dir, char* workspace)
       goto error;
    }
 
+   if (parse_pgbackrest_backup_info(dest, cipher, backups))
+   {
+      pgmoneta_log_error("Failed to parse backup info at %s", dest);
+      goto error;
+   }
+
    free(dest);
    free(backup_info_path);
    return 0;
@@ -159,6 +174,142 @@ build_target_dir(char* source_dir, char* server, char** target_dir)
 }
 
 static int
+parse_pgbackrest_backup_info(char* path, char** cipher, struct art** backups)
+{
+   struct art* dict = NULL;
+   struct json* backup_data = NULL;
+   struct pgbackrest_backup_info* bck = NULL;
+   char* ciph = NULL;
+   char buffer[INFO_BUFFER_SIZE];
+   FILE* file = NULL;
+   bool is_backup_section = false;
+
+   *cipher = NULL;
+   *backups = NULL;
+
+   pgmoneta_art_create(&dict);
+
+   if (pgmoneta_exists(path))
+   {
+      file = fopen(path, "r");
+      if (file == NULL)
+      {
+         pgmoneta_log_error("Could not open file %s due to %s", path, strerror(errno));
+         errno = 0;
+         goto error;
+      }
+   }
+
+   if (file != NULL)
+   {
+      while ((fgets(&buffer[0], sizeof(buffer), file)) != NULL)
+      {
+         char key[INFO_BUFFER_SIZE];
+         char value[INFO_BUFFER_SIZE];
+         char* ptr = NULL;
+
+         if (buffer[0] == '\n')
+         {
+            continue;
+         }
+
+         if (pgmoneta_starts_with(buffer, "["))
+         {
+            if (pgmoneta_starts_with(buffer, "[backup:current]"))
+            {
+               pgmoneta_log_debug("Reaching backup section");
+               is_backup_section = true;
+            }
+            else if (is_backup_section)
+            {
+               pgmoneta_log_debug("Finishing backup section");
+               is_backup_section = false;
+            }
+            continue;
+         }
+
+         memset(&key[0], 0, sizeof(key));
+         memset(&value[0], 0, sizeof(value));
+         pgmoneta_log_debug("buffer %s,", buffer);
+
+         ptr = strtok(&buffer[0], "=");
+
+         if (ptr == NULL)
+         {
+            goto error;
+         }
+
+         memcpy(&key[0], ptr, strlen(ptr));
+
+         ptr = strtok(NULL, "=");
+
+         if (ptr == NULL)
+         {
+            goto error;
+         }
+
+         memcpy(&value[0], ptr, strlen(ptr) - 1);
+
+         if (is_backup_section)
+         {
+            if (pgmoneta_json_parse_string(value, &backup_data))
+            {
+               pgmoneta_log_error("unable to parse backup info %s", value);
+               goto error;
+            }
+            if (pgbackrest_backup_info_create(key, backup_data, &bck))
+            {
+               pgmoneta_log_error("unable to create backup info %s", key);
+               goto error;
+            }
+            if (insert_pgbackrest_backup_info(key, bck, dict))
+            {
+               pgmoneta_log_error("unable to insert backup info");
+               goto error;
+            }
+            bck = NULL;
+            pgmoneta_json_destroy(backup_data);
+            backup_data = NULL;
+         }
+         else if (pgmoneta_compare_string("cipher-pass", &key[0]))
+         {
+            ciph = pgmoneta_append(ciph, value);
+         }
+      }
+   }
+
+   if (file != NULL)
+   {
+      fclose(file);
+   }
+
+   *cipher = ciph;
+   *backups = dict;
+   return 0;
+
+error:
+
+   if (file != NULL)
+   {
+      fclose(file);
+   }
+
+   free(ciph);
+   pgmoneta_art_destroy(dict);
+   pgmoneta_json_destroy(backup_data);
+   pgbackrest_backup_info_destroy(bck);
+   return 1;
+}
+
+static int
+insert_pgbackrest_backup_info(char* backup_id, struct pgbackrest_backup_info* backup, struct art* backups)
+{
+   struct value_config vc = {.destroy_data = &pgbackrest_backup_info_destroy_cb,
+                             .to_string = NULL};
+   return pgmoneta_art_insert_with_config(backups, backup_id, (uintptr_t)backup, &vc);
+}
+
+static int
 pgbackrest_backup_info_create(char* backup_id, struct json* info, struct pgbackrest_backup_info** backup)
 {
    struct pgbackrest_backup_info* b = NULL;
@@ -172,6 +323,7 @@ pgbackrest_backup_info_create(char* backup_id, struct json* info, struct pgbackr
       pgmoneta_log_error("Incorrect backup info type");
       goto error;
    }
+   *backup = NULL;
 
    b = malloc(sizeof(struct pgbackrest_backup_info));
    memset(b, 0, sizeof(struct pgbackrest_backup_info));
@@ -207,7 +359,7 @@ pgbackrest_backup_info_create(char* backup_id, struct json* info, struct pgbackr
    {
       b->backup_parent = pgmoneta_append(b->backup_parent, (char*)pgmoneta_json_get(info, "backup-prior"));
 
-      backup_chain = pgmoneta_json_get(info, "backup-reference");
+      backup_chain = (struct json*)pgmoneta_json_get(info, "backup-reference");
 
       if (backup_chain == NULL || backup_chain->type != JSONArray)
       {
@@ -216,8 +368,9 @@ pgbackrest_backup_info_create(char* backup_id, struct json* info, struct pgbackr
       }
 
       b->backup_chain_size = pgmoneta_json_array_length(backup_chain);
+      pgmoneta_log_debug("chain size %d", (int)b->backup_chain_size);
       b->backup_chain = malloc(sizeof(char*) * b->backup_chain_size);
-      memset(b->backup_chain, 0, sizeof(sizeof(char*) * b->backup_chain_size));
+      memset(b->backup_chain, 0, sizeof(char*) * b->backup_chain_size);
       pgmoneta_json_iterator_create(backup_chain, &iter);
       while (pgmoneta_json_iterator_next(iter))
       {
@@ -240,6 +393,10 @@ error:
 static void
 pgbackrest_backup_info_destroy(struct pgbackrest_backup_info* backup)
 {
+   if (backup == NULL)
+   {
+      return;
+   }
    free(backup->lsn_start);
    free(backup->lsn_stop);
    free(backup->archive_start);
@@ -257,5 +414,4 @@ static void
 pgbackrest_backup_info_destroy_cb(uintptr_t data)
 {
    pgbackrest_backup_info_destroy((struct pgbackrest_backup_info*)data);
-   return 0;
 }
