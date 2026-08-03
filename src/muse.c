@@ -269,7 +269,7 @@ usage(void)
    printf("  -D, --directory DIRECTORY Set the path to the backup directory\n");
    printf("  -i, --backup-id BACKUP_ID The final backup in the backup chain, all backups in the chain will be migrated\n");
    printf("  -L, --logfile FILE        Set the log file\n");
-   printf("  -s, --server SERVER       Set the target server name the backups correspond to post migration");
+   printf("  -s, --server SERVER       Set the target server name the backups correspond to post migration\n");
    printf("  -V, --version             Display version information\n");
    printf("  -?, --help                Display help\n");
    printf("\n");
