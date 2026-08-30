@@ -70,7 +70,7 @@ main(int argc, char** argv)
    cli_option options[] = {
       {"d", "dry-run", false},
       {"c", "config", true},
-      {"i", "backup-id", true},
+      {"b", "backup-id", true},
       {"D", "directory", true},
       {"L", "logfile", true},
       {"s", "server", true},
@@ -106,7 +106,7 @@ main(int argc, char** argv)
       {
          directory = optarg;
       }
-      else if (match_opt(optname, "i", "backup-id"))
+      else if (match_opt(optname, "b", "backup-id"))
       {
          backup_id = optarg;
       }
@@ -262,12 +262,12 @@ usage(void)
    printf("\n");
 
    printf("Usage:\n");
-   printf("  pgmoneta-muse {-D DIRECTORY} {-s SERVER} {-i BACKUP_ID} [ -c CONFIG_FILE ]\n");
+   printf("  pgmoneta-muse {-D DIRECTORY} {-s SERVER} {-b BACKUP_ID} [ -c CONFIG_FILE ]\n");
    printf("\n");
    printf("Options:\n");
    printf("  -c, --config CONFIG_FILE  Set the path to the pgmoneta_muse.conf file\n");
    printf("  -D, --directory DIRECTORY Set the path to the backup directory\n");
-   printf("  -i, --backup-id BACKUP_ID The final backup in the backup chain, all backups in the chain will be migrated\n");
+   printf("  -b, --backup-id BACKUP_ID The final backup in the backup chain, all backups in the chain will be migrated\n");
    printf("  -L, --logfile FILE        Set the log file\n");
    printf("  -s, --server SERVER       Set the target server name the backups correspond to post migration\n");
    printf("  -V, --version             Display version information\n");

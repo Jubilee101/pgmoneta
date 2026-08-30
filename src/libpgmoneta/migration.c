@@ -43,6 +43,7 @@
 
 #define PGBACKREST_BACKUP_INFO "backup.info"
 #define CBC_DIGEST_DEFAULT     "sha1"
+#define BACKUP_ID_SIZE         14
 
 struct pgbackrest_backup_info
 {
@@ -68,6 +69,8 @@ static int insert_pgbackrest_backup_info(char* backup_id, struct pgbackrest_back
 static int pgbackrest_backup_info_create(char* backup_id, struct json* info, struct pgbackrest_backup_info** backup);
 static void pgbackrest_backup_info_destroy(struct pgbackrest_backup_info* backup);
 static void pgbackrest_backup_info_destroy_cb(uintptr_t data);
+static void get_target_backup_id(time_t start_time, char** target_id);
+static bool target_backup_exists(struct pgbackrest_backup_info* backup, char* target_dir);
 
 int
 pgmoneta_migrate(char* source_dir, char* backup_id, char* server, char* workspace)
@@ -88,12 +91,20 @@ migrate_pgbackrest(char* source_dir, char* backup_id, char* server, char* worksp
    char* target_dir = NULL;
    char* cipher = NULL;
    struct art* backups = NULL;
+   struct pgbackrest_backup_info* bck = NULL;
    // struct muse_configuration* config = NULL;
 
    // config = (struct muse_configuration*)shmem;
    pgmoneta_log_info("Start migration from pgBackRest, workspace %s", workspace);
 
    build_target_dir(source_dir, server, &target_dir);
+   if (pgmoneta_exists(target_dir))
+   {
+      if (pgmoneta_delete_directory(target_dir))
+      {
+         pgmoneta_log_error("Failed to clean up target directory %s", target_dir);
+      }
+   }
    pgmoneta_log_info("Creating backup directory %s", target_dir);
    if (pgmoneta_mkdir(target_dir))
    {
@@ -103,6 +114,31 @@ migrate_pgbackrest(char* source_dir, char* backup_id, char* server, char* worksp
    if (load_backup_info(source_dir, workspace, &cipher, &backups))
    {
       pgmoneta_log_error("Failed to load backup info");
+   }
+
+   bck = (struct pgbackrest_backup_info*)pgmoneta_art_search(backups, backup_id);
+   if (bck == NULL)
+   {
+      pgmoneta_log_error("Unable to find backup info of %s", backup_id);
+      goto error;
+   }
+   else
+   {
+      pgmoneta_log_info("Found backup info of %s, backup start time %lld", backup_id, bck->start_time);
+   }
+
+   for (int i = 0; i < bck->backup_chain_size; i++)
+   {
+      char* parent_backup_id = bck->backup_chain[i];
+      struct pgbackrest_backup_info* b = (struct pgbackrest_backup_info*)pgmoneta_art_search(backups, parent_backup_id);
+      if (b == NULL)
+      {
+         pgmoneta_log_error("Failed to find parent backup %s", parent_backup_id);
+         goto error;
+      }
+      if (target_backup_exists(b, target_dir))
+      {
+      }
    }
    free(cipher);
    free(target_dir);
@@ -169,7 +205,7 @@ build_target_dir(char* source_dir, char* server, char** target_dir)
 
    dir = pgmoneta_append(dir, source_dir);
    dir = pgmoneta_append(dir, server);
-   dir = pgmoneta_append(dir, "/");
+   dir = pgmoneta_append(dir, "/backup/");
    *target_dir = dir;
 }
 
@@ -217,12 +253,10 @@ parse_pgbackrest_backup_info(char* path, char** cipher, struct art** backups)
          {
             if (pgmoneta_starts_with(buffer, "[backup:current]"))
             {
-               pgmoneta_log_debug("Reaching backup section");
                is_backup_section = true;
             }
             else if (is_backup_section)
             {
-               pgmoneta_log_debug("Finishing backup section");
                is_backup_section = false;
             }
             continue;
@@ -230,7 +264,6 @@ parse_pgbackrest_backup_info(char* path, char** cipher, struct art** backups)
 
          memset(&key[0], 0, sizeof(key));
          memset(&value[0], 0, sizeof(value));
-         pgmoneta_log_debug("buffer %s,", buffer);
 
          ptr = strtok(&buffer[0], "=");
 
@@ -368,7 +401,6 @@ pgbackrest_backup_info_create(char* backup_id, struct json* info, struct pgbackr
       }
 
       b->backup_chain_size = pgmoneta_json_array_length(backup_chain);
-      pgmoneta_log_debug("chain size %d", (int)b->backup_chain_size);
       b->backup_chain = malloc(sizeof(char*) * b->backup_chain_size);
       memset(b->backup_chain, 0, sizeof(char*) * b->backup_chain_size);
       pgmoneta_json_iterator_create(backup_chain, &iter);
@@ -414,4 +446,35 @@ static void
 pgbackrest_backup_info_destroy_cb(uintptr_t data)
 {
    pgbackrest_backup_info_destroy((struct pgbackrest_backup_info*)data);
+}
+
+static void
+get_target_backup_id(time_t start_time, char** target_id)
+{
+   char* id = NULL;
+   struct tm* time_info = localtime(&start_time);
+   *target_id = NULL;
+
+   id = (char*)malloc(BACKUP_ID_SIZE + 1);
+   memset(id, 0, BACKUP_ID_SIZE + 1);
+   strftime(id, BACKUP_ID_SIZE, "%Y%m%d%H%M%S", time_info);
+   *target_id = id;
+}
+
+static bool
+target_backup_exists(struct pgbackrest_backup_info* backup, char* target_dir)
+{
+   char* target_id = NULL;
+   char* path = NULL;
+   bool exists = false;
+
+   get_target_backup_id(backup->start_time, &target_id);
+
+   path = pgmoneta_append(path, target_dir);
+   path = pgmoneta_append(path, target_id);
+   exists = pgmoneta_exists(path);
+
+   free(target_id);
+   free(path);
+   return exists;
 }
