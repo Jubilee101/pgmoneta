@@ -41,9 +41,10 @@
 #include <stdio.h>
 #include <time.h>
 
-#define PGBACKREST_BACKUP_INFO "backup.info"
-#define CBC_DIGEST_DEFAULT     "sha1"
-#define BACKUP_ID_SIZE         14
+#define PGBACKREST_BACKUP_INFO     "backup.info"
+#define PGBACKREST_BACKUP_MANIFEST "backup.manifest"
+#define CBC_DIGEST_DEFAULT         "sha1"
+#define BACKUP_ID_SIZE             14
 
 struct pgbackrest_backup_info
 {
@@ -70,7 +71,8 @@ static int pgbackrest_backup_info_create(char* backup_id, struct json* info, str
 static void pgbackrest_backup_info_destroy(struct pgbackrest_backup_info* backup);
 static void pgbackrest_backup_info_destroy_cb(uintptr_t data);
 static void get_target_backup_id(time_t start_time, char** target_id);
-static bool target_backup_exists(struct pgbackrest_backup_info* backup, char* target_dir);
+static int migrate_pgbackrest_backup(struct pgbackrest_backup_info* backup_info, char* cipher, char* root_workspace, char* source_dir, char* target_dir);
+static int decrypt_pgbackrest_manifest(char* cipher, char* source_backup_path, char* workspace);
 
 int
 pgmoneta_migrate(char* source_dir, char* backup_id, char* server, char* workspace)
@@ -127,6 +129,12 @@ migrate_pgbackrest(char* source_dir, char* backup_id, char* server, char* worksp
       pgmoneta_log_info("Found backup info of %s, backup start time %lld", backup_id, bck->start_time);
    }
 
+   if (migrate_pgbackrest_backup(bck, cipher, workspace, source_dir, target_dir))
+   {
+      pgmoneta_log_error("Failed to migrate backup %s", bck->backup_id);
+      goto error;
+   }
+
    for (int i = 0; i < bck->backup_chain_size; i++)
    {
       char* parent_backup_id = bck->backup_chain[i];
@@ -136,10 +144,13 @@ migrate_pgbackrest(char* source_dir, char* backup_id, char* server, char* worksp
          pgmoneta_log_error("Failed to find parent backup %s", parent_backup_id);
          goto error;
       }
-      if (target_backup_exists(b, target_dir))
+      if (migrate_pgbackrest_backup(b, cipher, workspace, source_dir, target_dir))
       {
+         pgmoneta_log_error("Failed to migrate backup %s", b->backup_id);
+         goto error;
       }
    }
+
    free(cipher);
    free(target_dir);
    pgmoneta_art_destroy(backups);
@@ -170,6 +181,7 @@ load_backup_info(char* source_dir, char* workspace, char** cipher, struct art** 
 
    cipher_len = strlen(conf->source_cipher);
 
+   // TODO: handle the case where backup is not encrypted
    pgmoneta_log_info("Decrypting backup info from %s to %s", backup_info_path, dest);
    if (pgmoneta_cbc_decrypt_salted_file(CBC_DIGEST_DEFAULT,
                                         false,
@@ -461,20 +473,62 @@ get_target_backup_id(time_t start_time, char** target_id)
    *target_id = id;
 }
 
-static bool
-target_backup_exists(struct pgbackrest_backup_info* backup, char* target_dir)
+static int
+migrate_pgbackrest_backup(struct pgbackrest_backup_info* backup_info, char* cipher, char* root_workspace, char* source_dir, char* target_dir)
 {
-   char* target_id = NULL;
-   char* path = NULL;
-   bool exists = false;
+   char* target_backup_id = NULL;
+   char source_backup_path[MAX_PATH];
+   char target_backup_path[MAX_PATH];
+   char workspace[MAX_PATH];
+   memset(target_backup_path, 0, sizeof(target_backup_path));
+   memset(source_backup_path, 0, sizeof(source_backup_path));
+   memset(workspace, 0, sizeof(workspace));
 
-   get_target_backup_id(backup->start_time, &target_id);
+   get_target_backup_id(backup_info->start_time, &target_backup_id);
+   snprintf(source_backup_path, sizeof(source_backup_path), "%s%s/", source_dir, backup_info->backup_id);
+   snprintf(target_backup_path, sizeof(target_backup_path), "%s%s/", target_dir, target_backup_id);
+   snprintf(workspace, sizeof(workspace), "%s%s/", root_workspace, backup_info->backup_id);
 
-   path = pgmoneta_append(path, target_dir);
-   path = pgmoneta_append(path, target_id);
-   exists = pgmoneta_exists(path);
+   pgmoneta_log_info("Start to migrate backup %s from %s to %s", backup_info->backup_id, source_backup_path, target_backup_path);
 
-   free(target_id);
-   free(path);
-   return exists;
+   if (pgmoneta_mkdir(workspace))
+   {
+      pgmoneta_log_error("Failed to create workspace directory %s", workspace);
+      goto error;
+   }
+
+   if (pgmoneta_mkdir(target_backup_path))
+   {
+      pgmoneta_log_error("Failed to create backup directory %s", target_backup_path);
+      goto error;
+   }
+   //TODO: handle the case where backup is not encrypted
+   if (decrypt_pgbackrest_manifest(cipher, source_backup_path, workspace))
+   {
+      pgmoneta_log_error("Failed to decrypt backup manifest %s%s", source_backup_path, PGBACKREST_BACKUP_MANIFEST);
+      goto error;
+   }
+   free(target_backup_id);
+   return 0;
+error:
+   free(target_backup_id);
+   return 1;
+}
+
+static int
+decrypt_pgbackrest_manifest(char* cipher, char* source_backup_path, char* workspace)
+{
+   char manifest_path[MAX_PATH];
+   char dest[MAX_PATH];
+   memset(manifest_path, 0, sizeof(manifest_path));
+   memset(dest, 0, sizeof(dest));
+   snprintf(manifest_path, sizeof(manifest_path), "%s%s", source_backup_path, PGBACKREST_BACKUP_MANIFEST);
+   snprintf(dest, sizeof(dest), "%s%s", workspace, PGBACKREST_BACKUP_MANIFEST);
+   pgmoneta_log_info("decrypting %s to %s", manifest_path, dest);
+   return pgmoneta_cbc_decrypt_salted_file(CBC_DIGEST_DEFAULT,
+                                           false,
+                                           (unsigned char*)cipher,
+                                           strlen(cipher),
+                                           manifest_path,
+                                           dest);
 }
