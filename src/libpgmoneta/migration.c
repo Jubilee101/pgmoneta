@@ -61,6 +61,13 @@ struct pgbackrest_backup_info
    int type;
 };
 
+struct pgbackrest_manifest
+{
+   int compression;
+   char* backup_cipher;
+   struct art* files;
+};
+
 static int load_backup_info(char* source_dir, char* workspace, char** cipher, struct art** backup_info);
 static void build_target_dir(char* source_dir, char* server, char** target_dir);
 static int migrate_pgbackrest(char* source_dir, char* backup_id, char* server, char* workspace);
@@ -72,7 +79,10 @@ static void pgbackrest_backup_info_destroy(struct pgbackrest_backup_info* backup
 static void pgbackrest_backup_info_destroy_cb(uintptr_t data);
 static void get_target_backup_id(time_t start_time, char** target_id);
 static int migrate_pgbackrest_backup(struct pgbackrest_backup_info* backup_info, char* cipher, char* root_workspace, char* source_dir, char* target_dir);
-static int decrypt_pgbackrest_manifest(char* cipher, char* source_backup_path, char* workspace);
+static void pgbackrest_manifest_create(struct pgbackrest_manifest** manifest);
+static void pgbackrest_manifest_destroy(struct pgbackrest_manifest* manifest);
+static int load_pgbackrest_manifest(char* cipher, char* source_backup_path, char* workspace, struct pgbackrest_manifest** manifest);
+static int parse_pgbackrest_manifest(char* path, struct pgbackrest_manifest** manifest);
 
 int
 pgmoneta_migrate(char* source_dir, char* backup_id, char* server, char* workspace)
@@ -229,97 +239,87 @@ parse_pgbackrest_backup_info(char* path, char** cipher, struct art** backups)
    struct pgbackrest_backup_info* bck = NULL;
    char* ciph = NULL;
    char buffer[INFO_BUFFER_SIZE];
+   char section[128];
    FILE* file = NULL;
-   bool is_backup_section = false;
 
    *cipher = NULL;
    *backups = NULL;
 
    pgmoneta_art_create(&dict);
 
-   if (pgmoneta_exists(path))
+   file = fopen(path, "r");
+   if (file == NULL)
    {
-      file = fopen(path, "r");
-      if (file == NULL)
-      {
-         pgmoneta_log_error("Could not open file %s due to %s", path, strerror(errno));
-         errno = 0;
-         goto error;
-      }
+      pgmoneta_log_error("Could not open file %s: %s", path, strerror(errno));
+      errno = 0;
+      goto error;
    }
 
-   if (file != NULL)
+   while ((fgets(&buffer[0], sizeof(buffer), file)) != NULL)
    {
-      while ((fgets(&buffer[0], sizeof(buffer), file)) != NULL)
+      char key[INFO_BUFFER_SIZE];
+      char value[INFO_BUFFER_SIZE];
+      char* ptr = NULL;
+
+      if (buffer[0] == '\n')
       {
-         char key[INFO_BUFFER_SIZE];
-         char value[INFO_BUFFER_SIZE];
-         char* ptr = NULL;
+         continue;
+      }
 
-         if (buffer[0] == '\n')
+      if (buffer[0] == '[')
+      {
+         memset(section, 0, sizeof(section));
+         memcpy(section, buffer, strlen(buffer) - 1);
+         continue;
+      }
+
+      memset(&key[0], 0, sizeof(key));
+      memset(&value[0], 0, sizeof(value));
+
+      ptr = strtok(&buffer[0], "=");
+
+      if (ptr == NULL)
+      {
+         goto error;
+      }
+
+      memcpy(&key[0], ptr, strlen(ptr));
+
+      ptr = strtok(NULL, "=");
+
+      if (ptr == NULL)
+      {
+         goto error;
+      }
+
+      memcpy(&value[0], ptr, strlen(ptr) - 1);
+
+      if (pgmoneta_compare_string(section, "[backup:current]"))
+      {
+         if (pgmoneta_json_parse_string(value, &backup_data))
          {
-            continue;
-         }
-
-         if (pgmoneta_starts_with(buffer, "["))
-         {
-            if (pgmoneta_starts_with(buffer, "[backup:current]"))
-            {
-               is_backup_section = true;
-            }
-            else if (is_backup_section)
-            {
-               is_backup_section = false;
-            }
-            continue;
-         }
-
-         memset(&key[0], 0, sizeof(key));
-         memset(&value[0], 0, sizeof(value));
-
-         ptr = strtok(&buffer[0], "=");
-
-         if (ptr == NULL)
-         {
+            pgmoneta_log_error("unable to parse backup info %s", value);
             goto error;
          }
-
-         memcpy(&key[0], ptr, strlen(ptr));
-
-         ptr = strtok(NULL, "=");
-
-         if (ptr == NULL)
+         if (pgbackrest_backup_info_create(key, backup_data, &bck))
          {
+            pgmoneta_log_error("unable to create backup info %s", key);
             goto error;
          }
-
-         memcpy(&value[0], ptr, strlen(ptr) - 1);
-
-         if (is_backup_section)
+         if (insert_pgbackrest_backup_info(key, bck, dict))
          {
-            if (pgmoneta_json_parse_string(value, &backup_data))
-            {
-               pgmoneta_log_error("unable to parse backup info %s", value);
-               goto error;
-            }
-            if (pgbackrest_backup_info_create(key, backup_data, &bck))
-            {
-               pgmoneta_log_error("unable to create backup info %s", key);
-               goto error;
-            }
-            if (insert_pgbackrest_backup_info(key, bck, dict))
-            {
-               pgmoneta_log_error("unable to insert backup info");
-               goto error;
-            }
-            bck = NULL;
-            pgmoneta_json_destroy(backup_data);
-            backup_data = NULL;
+            pgmoneta_log_error("unable to insert backup info");
+            goto error;
          }
-         else if (pgmoneta_compare_string("cipher-pass", &key[0]))
-         {
-            ciph = pgmoneta_append(ciph, value);
-         }
+         bck = NULL;
+         pgmoneta_json_destroy(backup_data);
+         backup_data = NULL;
+      }
+      else if (pgmoneta_compare_string("cipher-pass", &key[0]))
+      {
+         // remove the double quotes
+         value[strlen(value) - 1] = 0;
+         ciph = pgmoneta_append(ciph, &value[1]);
       }
    }
 
@@ -480,6 +480,8 @@ migrate_pgbackrest_backup(struct pgbackrest_backup_info* backup_info, char* ciph
    char source_backup_path[MAX_PATH];
    char target_backup_path[MAX_PATH];
    char workspace[MAX_PATH];
+   struct pgbackrest_manifest* manifest = NULL;
+
    memset(target_backup_path, 0, sizeof(target_backup_path));
    memset(source_backup_path, 0, sizeof(source_backup_path));
    memset(workspace, 0, sizeof(workspace));
@@ -502,33 +504,198 @@ migrate_pgbackrest_backup(struct pgbackrest_backup_info* backup_info, char* ciph
       pgmoneta_log_error("Failed to create backup directory %s", target_backup_path);
       goto error;
    }
-   //TODO: handle the case where backup is not encrypted
-   if (decrypt_pgbackrest_manifest(cipher, source_backup_path, workspace))
+
+   if (load_pgbackrest_manifest(cipher, source_backup_path, workspace, &manifest))
    {
-      pgmoneta_log_error("Failed to decrypt backup manifest %s%s", source_backup_path, PGBACKREST_BACKUP_MANIFEST);
+      pgmoneta_log_error("Failed to load backup manifest %s%s", source_backup_path, PGBACKREST_BACKUP_MANIFEST);
       goto error;
    }
+
+   pgbackrest_manifest_destroy(manifest);
    free(target_backup_id);
    return 0;
 error:
+   pgbackrest_manifest_destroy(manifest);
    free(target_backup_id);
    return 1;
 }
 
+static void
+pgbackrest_manifest_create(struct pgbackrest_manifest** manifest)
+{
+   struct pgbackrest_manifest* m = NULL;
+   *manifest = NULL;
+   m = malloc(sizeof(struct pgbackrest_backup_info));
+   memset(m, 0, sizeof(struct pgbackrest_manifest));
+   pgmoneta_art_create(&m->files);
+   *manifest = m;
+}
+
+static void
+pgbackrest_manifest_destroy(struct pgbackrest_manifest* manifest)
+{
+   if (manifest == NULL)
+   {
+      return;
+   }
+   free(manifest->backup_cipher);
+   pgmoneta_art_destroy(manifest->files);
+}
+
 static int
-decrypt_pgbackrest_manifest(char* cipher, char* source_backup_path, char* workspace)
+load_pgbackrest_manifest(char* cipher, char* source_backup_path, char* workspace, struct pgbackrest_manifest** manifest)
 {
    char manifest_path[MAX_PATH];
    char dest[MAX_PATH];
+   struct pgbackrest_manifest* m = NULL;
+
+   *manifest = NULL;
+
    memset(manifest_path, 0, sizeof(manifest_path));
    memset(dest, 0, sizeof(dest));
    snprintf(manifest_path, sizeof(manifest_path), "%s%s", source_backup_path, PGBACKREST_BACKUP_MANIFEST);
    snprintf(dest, sizeof(dest), "%s%s", workspace, PGBACKREST_BACKUP_MANIFEST);
+
+   //TODO: handle the case where backup is not encrypted
    pgmoneta_log_info("decrypting %s to %s", manifest_path, dest);
-   return pgmoneta_cbc_decrypt_salted_file(CBC_DIGEST_DEFAULT,
-                                           false,
-                                           (unsigned char*)cipher,
-                                           strlen(cipher),
-                                           manifest_path,
-                                           dest);
+   if (pgmoneta_cbc_decrypt_salted_file(CBC_DIGEST_DEFAULT,
+                                        false,
+                                        (unsigned char*)cipher,
+                                        strlen(cipher),
+                                        manifest_path,
+                                        dest))
+   {
+      goto error;
+   }
+   pgmoneta_log_info("parsing manifest %s", dest);
+   if (parse_pgbackrest_manifest(dest, &m))
+   {
+      goto error;
+   }
+   *manifest = m;
+
+   return 0;
+error:
+   return 1;
+}
+
+static int
+parse_pgbackrest_manifest(char* path, struct pgbackrest_manifest** manifest)
+{
+   struct pgbackrest_manifest* m = NULL;
+   FILE* file = NULL;
+   char buffer[INFO_BUFFER_SIZE];
+   char section[128];
+   struct json* file_info = NULL;
+
+   *manifest = NULL;
+   pgbackrest_manifest_create(&m);
+   file = fopen(path, "r");
+   if (file == NULL)
+   {
+      pgmoneta_log_error("Could not open file %s: %s", path, strerror(errno));
+      errno = 0;
+      goto error;
+   }
+
+   while ((fgets(&buffer[0], sizeof(buffer), file)) != NULL)
+   {
+      char key[INFO_BUFFER_SIZE];
+      char value[INFO_BUFFER_SIZE];
+      char* ptr = NULL;
+
+      if (buffer[0] == '\n')
+      {
+         continue;
+      }
+
+      if (buffer[0] == '[')
+      {
+         memset(section, 0, sizeof(section));
+         memcpy(section, buffer, strlen(buffer) - 1);
+         continue;
+      }
+
+      memset(&key[0], 0, sizeof(key));
+      memset(&value[0], 0, sizeof(value));
+
+      ptr = strtok(&buffer[0], "=");
+
+      if (ptr == NULL)
+      {
+         goto error;
+      }
+
+      memcpy(&key[0], ptr, strlen(ptr));
+
+      ptr = strtok(NULL, "=");
+
+      if (ptr == NULL)
+      {
+         goto error;
+      }
+
+      memcpy(&value[0], ptr, strlen(ptr) - 1);
+
+      if (pgmoneta_compare_string(section, "[target:file]"))
+      {
+         if (pgmoneta_json_parse_string(value, &file_info))
+         {
+            pgmoneta_log_error("unable to parse backup info %s", value);
+            goto error;
+         }
+         pgmoneta_art_insert(m->files, key, (uintptr_t)file_info, ValueJSON);
+         file_info = NULL;
+      }
+      else if (pgmoneta_compare_string("cipher-pass", &key[0]))
+      {
+         // remove the double quotes
+         value[strlen(value) - 1] = 0;
+         m->backup_cipher = pgmoneta_append(m->backup_cipher, &value[1]);
+      }
+      else if (pgmoneta_compare_string("option-compress-type", &key[0]))
+      {
+         if (pgmoneta_compare_string(value, "\"none\""))
+         {
+            m->compression = COMPRESSION_NONE;
+         }
+         else if (pgmoneta_compare_string(value, "\"gz\""))
+         {
+            m->compression = COMPRESSION_CLIENT_GZIP;
+         }
+         else if (pgmoneta_compare_string(value, "\"bz2\""))
+         {
+            m->compression = COMPRESSION_CLIENT_BZIP2;
+         }
+         else if (pgmoneta_compare_string(value, "\"lz4\""))
+         {
+            m->compression = COMPRESSION_CLIENT_LZ4;
+         }
+         else if (pgmoneta_compare_string(value, "\"zst\""))
+         {
+            m->compression = COMPRESSION_CLIENT_ZSTD;
+         }
+         else
+         {
+            pgmoneta_log_error("Unrecognized compression method %s", value);
+            goto error;
+         }
+      }
+   }
+
+   if (file != NULL)
+   {
+      fclose(file);
+   }
+
+   *manifest = m;
+   return 0;
+error:
+   if (file != NULL)
+   {
+      fclose(file);
+   }
+
+   pgbackrest_manifest_destroy(m);
+   return 1;
 }
