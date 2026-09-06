@@ -38,6 +38,7 @@
 // system
 #include <assert.h>
 #include <errno.h>
+#include <libgen.h>
 #include <stdio.h>
 #include <time.h>
 
@@ -45,6 +46,7 @@
 #define PGBACKREST_BACKUP_MANIFEST "backup.manifest"
 #define CBC_DIGEST_DEFAULT         "sha1"
 #define BACKUP_ID_SIZE             14
+#define PG_DATA_PREFIX_LEN         strlen("pg_data/")
 
 struct pgbackrest_backup_info
 {
@@ -83,6 +85,8 @@ static void pgbackrest_manifest_create(struct pgbackrest_manifest** manifest);
 static void pgbackrest_manifest_destroy(struct pgbackrest_manifest* manifest);
 static int load_pgbackrest_manifest(char* cipher, char* source_backup_path, char* workspace, struct pgbackrest_manifest** manifest);
 static int parse_pgbackrest_manifest(char* path, struct pgbackrest_manifest** manifest);
+static int migrate_pgbackrest_file(struct pgbackrest_backup_info* backup_info, struct pgbackrest_manifest* manifest, char* relative_path, char* source_root_dir, char* target_root_dir);
+static int create_file_directory(char* target_root_dir, char* relative_path);
 
 int
 pgmoneta_migrate(char* source_dir, char* backup_id, char* server, char* workspace)
@@ -478,18 +482,25 @@ migrate_pgbackrest_backup(struct pgbackrest_backup_info* backup_info, char* ciph
 {
    char* target_backup_id = NULL;
    char source_backup_path[MAX_PATH];
+   char source_backup_data_path[MAX_PATH];
    char target_backup_path[MAX_PATH];
+   char target_backup_data_path[MAX_PATH];
    char workspace[MAX_PATH];
    struct pgbackrest_manifest* manifest = NULL;
+   struct art_iterator* iter = NULL;
 
    memset(target_backup_path, 0, sizeof(target_backup_path));
    memset(source_backup_path, 0, sizeof(source_backup_path));
+   memset(target_backup_data_path, 0, sizeof(target_backup_data_path));
+   memset(source_backup_data_path, 0, sizeof(source_backup_data_path));
    memset(workspace, 0, sizeof(workspace));
 
    get_target_backup_id(backup_info->start_time, &target_backup_id);
    snprintf(source_backup_path, sizeof(source_backup_path), "%s%s/", source_dir, backup_info->backup_id);
    snprintf(target_backup_path, sizeof(target_backup_path), "%s%s/", target_dir, target_backup_id);
    snprintf(workspace, sizeof(workspace), "%s%s/", root_workspace, backup_info->backup_id);
+   snprintf(source_backup_data_path, sizeof(source_backup_data_path), "%s%s/pg_data/", source_dir, backup_info->backup_id);
+   snprintf(target_backup_data_path, sizeof(target_backup_data_path), "%s%s/data/", target_dir, target_backup_id);
 
    pgmoneta_log_info("Start to migrate backup %s from %s to %s", backup_info->backup_id, source_backup_path, target_backup_path);
 
@@ -497,6 +508,11 @@ migrate_pgbackrest_backup(struct pgbackrest_backup_info* backup_info, char* ciph
    {
       pgmoneta_log_error("Failed to create workspace directory %s", workspace);
       goto error;
+   }
+
+   if (pgmoneta_exists(target_backup_path))
+   {
+      pgmoneta_delete_directory(target_backup_path);
    }
 
    if (pgmoneta_mkdir(target_backup_path))
@@ -511,10 +527,25 @@ migrate_pgbackrest_backup(struct pgbackrest_backup_info* backup_info, char* ciph
       goto error;
    }
 
+   pgmoneta_art_iterator_create(manifest->files, &iter);
+   while (pgmoneta_art_iterator_next(iter))
+   {
+      if (pgmoneta_starts_with(iter->key, "pg_wal/summaries/"))
+      {
+         pgmoneta_log_info("Skipping WAL summary file %s", iter->key);
+         continue;
+      }
+      if (migrate_pgbackrest_file(backup_info, manifest, iter->key, source_backup_data_path, target_backup_data_path))
+      {
+         goto error;
+      }
+   }
+   pgmoneta_art_iterator_destroy(iter);
    pgbackrest_manifest_destroy(manifest);
    free(target_backup_id);
    return 0;
 error:
+   pgmoneta_art_iterator_destroy(iter);
    pgbackrest_manifest_destroy(manifest);
    free(target_backup_id);
    return 1;
@@ -644,7 +675,8 @@ parse_pgbackrest_manifest(char* path, struct pgbackrest_manifest** manifest)
             pgmoneta_log_error("unable to parse backup info %s", value);
             goto error;
          }
-         pgmoneta_art_insert(m->files, key, (uintptr_t)file_info, ValueJSON);
+         // strip the pg_data/ entry
+         pgmoneta_art_insert(m->files, &key[PG_DATA_PREFIX_LEN], (uintptr_t)file_info, ValueJSON);
          file_info = NULL;
       }
       else if (pgmoneta_compare_string("cipher-pass", &key[0]))
@@ -697,5 +729,43 @@ error:
    }
 
    pgbackrest_manifest_destroy(m);
+   return 1;
+}
+
+static int
+migrate_pgbackrest_file(struct pgbackrest_backup_info* backup_info, struct pgbackrest_manifest* manifest, char* relative_path, char* source_root_dir, char* target_root_dir)
+{
+   if (create_file_directory(target_root_dir, relative_path))
+   {
+      goto error;
+   }
+   return 0;
+error:
+   return 1;
+}
+
+static int
+create_file_directory(char* target_root_dir, char* relative_path)
+{
+   char* path = NULL;
+   path = pgmoneta_append(path, target_root_dir);
+   path = pgmoneta_append(path, relative_path);
+   char* dir = dirname(path);
+
+   if (!pgmoneta_exists(dir))
+   {
+      pgmoneta_log_info("Creating directory for %s", path);
+      if (pgmoneta_mkdir(dir))
+      {
+         pgmoneta_log_error("Failed to create directory %s: %s", dir, strerror(errno));
+         errno = 0;
+         goto error;
+      }
+   }
+
+   free(path);
+   return 0;
+error:
+   free(path);
    return 1;
 }
