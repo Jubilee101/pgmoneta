@@ -230,11 +230,12 @@ main(int argc, char** argv)
       pgmoneta_log_error("Failed to migrate source directory %s", directory);
    }
 
+   pgmoneta_log_info("pgmoneta-muse: migration finished");
+
    pgmoneta_stop_logging();
    pgmoneta_destroy_shared_memory(shmem, sizeof(struct muse_configuration));
 
-   // TODO: uncomment to cleanup
-   // pgmoneta_delete_directory(workspace);
+   pgmoneta_delete_directory(workspace);
 
    free(source_dir);
    free(workspace);
