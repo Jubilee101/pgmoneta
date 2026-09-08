@@ -28,6 +28,7 @@
 #include <pgmoneta.h>
 #include <aes.h>
 #include <art.h>
+#include <compression.h>
 #include <info.h>
 #include <json.h>
 #include <logging.h>
@@ -456,6 +457,7 @@ pgbackrest_backup_info_destroy(struct pgbackrest_backup_info* backup)
    }
    free(backup->backup_chain);
    free(backup->backup_parent);
+   free(backup->backup_id);
    free(backup);
 }
 
@@ -504,7 +506,7 @@ migrate_pgbackrest_backup(struct pgbackrest_backup_info* backup_info, char* ciph
    snprintf(workspace, sizeof(workspace), "%s%s/", root_workspace, backup_info->backup_id);
    snprintf(source_backup_data_path, sizeof(source_backup_data_path), "%s%s/pg_data/", source_dir, backup_info->backup_id);
    snprintf(target_backup_data_path, sizeof(target_backup_data_path), "%s%s/data/", target_dir, target_backup_id);
-   snprintf(workspace, sizeof(workspace), "%s%s/data/", root_workspace, backup_info->backup_id);
+   snprintf(data_workspace, sizeof(data_workspace), "%s%s/data/", root_workspace, backup_info->backup_id);
 
    pgmoneta_log_info("Start to migrate backup %s from %s to %s", backup_info->backup_id, source_backup_path, target_backup_path);
 
@@ -536,7 +538,6 @@ migrate_pgbackrest_backup(struct pgbackrest_backup_info* backup_info, char* ciph
    {
       if (pgmoneta_starts_with(iter->key, "pg_wal/summaries/"))
       {
-         pgmoneta_log_info("Skipping WAL summary file %s", iter->key);
          continue;
       }
       if (migrate_pgbackrest_file(backup_info, manifest, iter->key, source_backup_data_path, target_backup_data_path, data_workspace))
@@ -544,6 +545,8 @@ migrate_pgbackrest_backup(struct pgbackrest_backup_info* backup_info, char* ciph
          goto error;
       }
    }
+
+   pgmoneta_log_info("pgmoneta-muse: backup %s successfully migrated to %s", backup_info->backup_id, target_backup_path);
    pgmoneta_art_iterator_destroy(iter);
    pgbackrest_manifest_destroy(manifest);
    free(target_backup_id);
@@ -742,14 +745,42 @@ migrate_pgbackrest_file(struct pgbackrest_backup_info* backup_info, struct pgbac
 {
    char* source_file_path = NULL;
    char* target_file_path = NULL;
+   char* workspace_file_path = NULL;
    struct json* file_info = NULL;
    char* reference_backup = NULL;
+
+   (void)backup_info;
 
    source_file_path = pgmoneta_append(source_file_path, source_root_dir);
    source_file_path = pgmoneta_append(source_file_path, relative_path);
    target_file_path = pgmoneta_append(target_file_path, target_root_dir);
    target_file_path = pgmoneta_append(target_file_path, relative_path);
-   file_info = (struct json*)pgmoneta_json_get(manifest->files, relative_path);
+   workspace_file_path = pgmoneta_append(workspace_file_path, workspace_root_dir);
+   workspace_file_path = pgmoneta_append(workspace_file_path, relative_path);
+
+   switch (manifest->compression)
+   {
+      case COMPRESSION_CLIENT_GZIP:
+         source_file_path = pgmoneta_append(source_file_path, ".gz");
+         workspace_file_path = pgmoneta_append(workspace_file_path, ".gz");
+         break;
+      case COMPRESSION_CLIENT_LZ4:
+         source_file_path = pgmoneta_append(source_file_path, ".lz4");
+         workspace_file_path = pgmoneta_append(workspace_file_path, ".lz4");
+         break;
+      case COMPRESSION_CLIENT_ZSTD:
+         source_file_path = pgmoneta_append(source_file_path, ".zst");
+         workspace_file_path = pgmoneta_append(workspace_file_path, ".zst");
+         break;
+      case COMPRESSION_CLIENT_BZIP2:
+         source_file_path = pgmoneta_append(source_file_path, ".bz2");
+         workspace_file_path = pgmoneta_append(workspace_file_path, ".bz2");
+         break;
+      default:
+         break;
+   }
+
+   file_info = (struct json*)pgmoneta_art_search(manifest->files, relative_path);
    if (file_info == NULL)
    {
       pgmoneta_log_error("Unable to find %s in the manifest", relative_path);
@@ -765,10 +796,21 @@ migrate_pgbackrest_file(struct pgbackrest_backup_info* backup_info, struct pgbac
 
    if (!pgmoneta_json_contains_key(file_info, PGBACKREST_FILE_REFERENCE))
    {
-      // full file, copy directly
-      if (pgmoneta_copy_file(source_file_path, target_file_path, NULL))
+      // full file, decrypt and copy to workspace first
+      // TODO: handle non encrypted case
+      if (pgmoneta_cbc_decrypt_salted_file(CBC_DIGEST_DEFAULT,
+                                           false,
+                                           (unsigned char*)manifest->backup_cipher,
+                                           strlen(manifest->backup_cipher),
+                                           source_file_path,
+                                           workspace_file_path))
       {
-         pgmoneta_log_error("Failed to copy %s to %s", source_file_path, target_file_path);
+         pgmoneta_log_error("Failed to decrypt %s to %s", source_file_path, target_file_path);
+         goto error;
+      }
+      if (pgmoneta_decompress_file(workspace_file_path, target_file_path, manifest->compression, NULL))
+      {
+         pgmoneta_log_error("Failed to decompress %s -> %s", workspace_file_path, target_file_path);
          goto error;
       }
    }
@@ -784,10 +826,12 @@ migrate_pgbackrest_file(struct pgbackrest_backup_info* backup_info, struct pgbac
 
    free(source_file_path);
    free(target_file_path);
+   free(workspace_file_path);
    return 0;
 error:
    free(source_file_path);
    free(target_file_path);
+   free(workspace_file_path);
    return 1;
 }
 
