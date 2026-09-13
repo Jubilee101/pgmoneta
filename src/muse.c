@@ -235,7 +235,8 @@ main(int argc, char** argv)
    pgmoneta_stop_logging();
    pgmoneta_destroy_shared_memory(shmem, sizeof(struct muse_configuration));
 
-   pgmoneta_delete_directory(workspace);
+   // TODO: uncomment to cleanup
+   // pgmoneta_delete_directory(workspace);
 
    free(source_dir);
    free(workspace);
