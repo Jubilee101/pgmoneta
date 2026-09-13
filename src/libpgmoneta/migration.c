@@ -46,7 +46,7 @@
 #define PGBACKREST_BACKUP_INFO     "backup.info"
 #define PGBACKREST_BACKUP_MANIFEST "backup.manifest"
 #define CBC_DIGEST_DEFAULT         "sha1"
-#define BACKUP_ID_SIZE             14
+#define BACKUP_ID_SIZE             15
 #define PG_DATA_PREFIX_LEN         strlen("pg_data/")
 #define PGBACKREST_FILE_REFERENCE  "reference"
 
@@ -82,13 +82,16 @@ static int pgbackrest_backup_info_create(char* backup_id, struct json* info, str
 static void pgbackrest_backup_info_destroy(struct pgbackrest_backup_info* backup);
 static void pgbackrest_backup_info_destroy_cb(uintptr_t data);
 static void get_target_backup_id(time_t start_time, char** target_id);
-static int migrate_pgbackrest_backup(struct pgbackrest_backup_info* backup_info, char* cipher, char* root_workspace, char* source_dir, char* target_dir);
+static int migrate_pgbackrest_backup(struct art* backups, struct pgbackrest_backup_info* backup_info, struct art* references, char* cipher, char* root_workspace, char* source_dir, char* target_dir);
 static void pgbackrest_manifest_create(struct pgbackrest_manifest** manifest);
 static void pgbackrest_manifest_destroy(struct pgbackrest_manifest* manifest);
 static int load_pgbackrest_manifest(char* cipher, char* source_backup_path, char* workspace, struct pgbackrest_manifest** manifest);
 static int parse_pgbackrest_manifest(char* path, struct pgbackrest_manifest** manifest);
-static int migrate_pgbackrest_file(struct pgbackrest_backup_info* backup_info, struct pgbackrest_manifest* manifest, char* relative_path, char* source_root_dir, char* target_root_dir, char* workspace_root_dir);
+static int migrate_pgbackrest_file(struct art* backups, struct pgbackrest_backup_info* backup_info, struct pgbackrest_manifest* manifest, struct art* references, char* relative_path, char* source_root_dir, char* target_root_dir, char* workspace_root_dir);
 static int create_file_directory(char* target_root_dir, char* workspace_root_dir, char* relative_path);
+static int insert_backup_file_referrer(char* reference_backup_id, char* relative_path, char* referrer_backup_id, struct art* references);
+static char* get_backup_file_referrer(char* reference_backup_id, char* relative_path, struct art* references);
+static int create_file_link_placeholder(char* target_dir, char* relative_path, char* reference_backup_id);
 
 int
 pgmoneta_migrate(char* source_dir, char* backup_id, char* server, char* workspace)
@@ -109,12 +112,13 @@ migrate_pgbackrest(char* source_dir, char* backup_id, char* server, char* worksp
    char* target_dir = NULL;
    char* cipher = NULL;
    struct art* backups = NULL;
+   struct art* references = NULL;
    struct pgbackrest_backup_info* bck = NULL;
    // struct muse_configuration* config = NULL;
 
    // config = (struct muse_configuration*)shmem;
    pgmoneta_log_info("Start migration from pgBackRest, workspace %s", workspace);
-
+   pgmoneta_art_create(&references);
    build_target_dir(source_dir, server, &target_dir);
    if (pgmoneta_exists(target_dir))
    {
@@ -155,7 +159,7 @@ migrate_pgbackrest(char* source_dir, char* backup_id, char* server, char* worksp
          pgmoneta_log_error("Failed to find parent backup %s", parent_backup_id);
          goto error;
       }
-      if (migrate_pgbackrest_backup(b, cipher, workspace, source_dir, target_dir))
+      if (migrate_pgbackrest_backup(backups, b, references, cipher, workspace, source_dir, target_dir))
       {
          pgmoneta_log_error("Failed to migrate backup %s", b->backup_id);
          goto error;
@@ -164,7 +168,7 @@ migrate_pgbackrest(char* source_dir, char* backup_id, char* server, char* worksp
    }
 
    pgmoneta_log_info("Start migrating backup %s", bck->backup_id);
-   if (migrate_pgbackrest_backup(bck, cipher, workspace, source_dir, target_dir))
+   if (migrate_pgbackrest_backup(backups, bck, references, cipher, workspace, source_dir, target_dir))
    {
       pgmoneta_log_error("Failed to migrate backup %s", bck->backup_id);
       goto error;
@@ -173,6 +177,7 @@ migrate_pgbackrest(char* source_dir, char* backup_id, char* server, char* worksp
 
    free(cipher);
    free(target_dir);
+   pgmoneta_art_destroy(references);
    pgmoneta_art_destroy(backups);
    return 0;
 
@@ -180,6 +185,7 @@ error:
    pgmoneta_delete_directory(target_dir);
    free(target_dir);
    free(cipher);
+   pgmoneta_art_destroy(references);
    pgmoneta_art_destroy(backups);
    return 1;
 }
@@ -478,14 +484,14 @@ get_target_backup_id(time_t start_time, char** target_id)
    struct tm* time_info = localtime(&start_time);
    *target_id = NULL;
 
-   id = (char*)malloc(BACKUP_ID_SIZE + 1);
-   memset(id, 0, BACKUP_ID_SIZE + 1);
+   id = (char*)malloc(BACKUP_ID_SIZE);
+   memset(id, 0, BACKUP_ID_SIZE);
    strftime(id, BACKUP_ID_SIZE, "%Y%m%d%H%M%S", time_info);
    *target_id = id;
 }
 
 static int
-migrate_pgbackrest_backup(struct pgbackrest_backup_info* backup_info, char* cipher, char* root_workspace, char* source_dir, char* target_dir)
+migrate_pgbackrest_backup(struct art* backups, struct pgbackrest_backup_info* backup_info, struct art* references, char* cipher, char* root_workspace, char* source_dir, char* target_dir)
 {
    char* target_backup_id = NULL;
    char source_backup_path[MAX_PATH];
@@ -544,13 +550,11 @@ migrate_pgbackrest_backup(struct pgbackrest_backup_info* backup_info, char* ciph
       {
          continue;
       }
-      if (migrate_pgbackrest_file(backup_info, manifest, iter->key, source_backup_data_path, target_backup_data_path, data_workspace))
+      if (migrate_pgbackrest_file(backups, backup_info, manifest, references, iter->key, source_backup_data_path, target_backup_data_path, data_workspace))
       {
          goto error;
       }
    }
-
-   pgmoneta_log_info("pgmoneta-muse: backup chain ending at %s successfully migrated to %s", backup_info->backup_id, target_backup_path);
    pgmoneta_art_iterator_destroy(iter);
    pgbackrest_manifest_destroy(manifest);
    free(target_backup_id);
@@ -745,15 +749,17 @@ error:
 }
 
 static int
-migrate_pgbackrest_file(struct pgbackrest_backup_info* backup_info, struct pgbackrest_manifest* manifest, char* relative_path, char* source_root_dir, char* target_root_dir, char* workspace_root_dir)
+migrate_pgbackrest_file(struct art* backups, struct pgbackrest_backup_info* backup_info, struct pgbackrest_manifest* manifest, struct art* references, char* relative_path, char* source_root_dir, char* target_root_dir, char* workspace_root_dir)
 {
    char* source_file_path = NULL;
    char* target_file_path = NULL;
    char* workspace_file_path = NULL;
    struct json* file_info = NULL;
-   char* reference_backup = NULL;
-
-   (void)backup_info;
+   char* root_reference_backup = NULL;
+   char* latest_referrer_backup = NULL;
+   char* target_backup_id = NULL;
+   char* root_reference_backup_id = NULL;
+   struct pgbackrest_backup_info* root_reference_backup_info = NULL;
 
    source_file_path = pgmoneta_append(source_file_path, source_root_dir);
    source_file_path = pgmoneta_append(source_file_path, relative_path);
@@ -761,6 +767,7 @@ migrate_pgbackrest_file(struct pgbackrest_backup_info* backup_info, struct pgbac
    target_file_path = pgmoneta_append(target_file_path, relative_path);
    workspace_file_path = pgmoneta_append(workspace_file_path, workspace_root_dir);
    workspace_file_path = pgmoneta_append(workspace_file_path, relative_path);
+   get_target_backup_id(backup_info->start_time, &target_backup_id);
 
    switch (manifest->compression)
    {
@@ -820,26 +827,56 @@ migrate_pgbackrest_file(struct pgbackrest_backup_info* backup_info, struct pgbac
    }
    else
    {
-      reference_backup = (char*)pgmoneta_json_get(file_info, PGBACKREST_FILE_REFERENCE);
-      if (reference_backup == NULL)
+      root_reference_backup = (char*)pgmoneta_json_get(file_info, PGBACKREST_FILE_REFERENCE);
+      if (root_reference_backup == NULL)
       {
          pgmoneta_log_error("Failed to get reference backup from manifest entry %s", relative_path);
          goto error;
       }
-      if (pgmoneta_exists(source_file_path))
+
+      latest_referrer_backup = get_backup_file_referrer(root_reference_backup, relative_path, references);
+      if (latest_referrer_backup == NULL)
       {
-         pgmoneta_log_info("found source file %s", source_file_path);
+         root_reference_backup_info = (struct pgbackrest_backup_info*)pgmoneta_art_search(backups, root_reference_backup);
+         if (root_reference_backup_info == NULL)
+         {
+            pgmoneta_log_error("Failed to find referenced backup %s", root_reference_backup);
+            goto error;
+         }
+         get_target_backup_id(root_reference_backup_info->start_time, &root_reference_backup_id);
+         if (create_file_link_placeholder(target_root_dir, relative_path, root_reference_backup_id))
+         {
+            pgmoneta_log_error("Failed to create placeholder for file %s referencing %s", relative_path, root_reference_backup);
+            goto error;
+         }
+      }
+      else
+      {
+         if (create_file_link_placeholder(target_root_dir, relative_path, latest_referrer_backup))
+         {
+            pgmoneta_log_error("Failed to create placeholder for file %s referencing %s", relative_path, latest_referrer_backup);
+            goto error;
+         }
+      }
+      if (insert_backup_file_referrer(root_reference_backup, relative_path, target_backup_id, references))
+      {
+         pgmoneta_log_error("Failed to insert latest reference record for file %s referencing %s", relative_path, root_reference_backup);
+         goto error;
       }
    }
 
    free(source_file_path);
    free(target_file_path);
    free(workspace_file_path);
+   free(target_backup_id);
+   free(root_reference_backup_id);
    return 0;
 error:
    free(source_file_path);
    free(target_file_path);
    free(workspace_file_path);
+   free(target_backup_id);
+   free(root_reference_backup_id);
    return 1;
 }
 
@@ -858,7 +895,7 @@ create_file_directory(char* target_root_dir, char* workspace_root_dir, char* rel
 
    if (!pgmoneta_exists(dir))
    {
-      pgmoneta_log_info("Creating directory for %s", dir);
+      pgmoneta_log_debug("Creating directory for %s", dir);
       if (pgmoneta_mkdir(dir))
       {
          goto error;
@@ -867,7 +904,7 @@ create_file_directory(char* target_root_dir, char* workspace_root_dir, char* rel
 
    if (!pgmoneta_exists(wspc_dir))
    {
-      pgmoneta_log_info("Creating workspace directory for %s", wspc_dir);
+      pgmoneta_log_debug("Creating workspace directory for %s", wspc_dir);
       if (pgmoneta_mkdir(wspc_dir))
       {
          goto error;
@@ -880,5 +917,96 @@ create_file_directory(char* target_root_dir, char* workspace_root_dir, char* rel
 error:
    free(path);
    free(workspace_path);
+   return 1;
+}
+
+static int
+insert_backup_file_referrer(char* reference_backup_id, char* relative_path, char* referrer_backup_id, struct art* references)
+{
+   char* key = NULL;
+   int ret = 0;
+
+   if (references == NULL)
+   {
+      goto error;
+   }
+
+   key = pgmoneta_append(key, reference_backup_id);
+   key = pgmoneta_append(key, "_");
+   key = pgmoneta_append(key, relative_path);
+
+   ret = pgmoneta_art_insert(references, key, (uintptr_t)referrer_backup_id, ValueString);
+   free(key);
+
+   return ret;
+error:
+   free(key);
+   return 1;
+}
+
+static char*
+get_backup_file_referrer(char* reference_backup_id, char* relative_path, struct art* references)
+{
+   char* key = NULL;
+   char* val = NULL;
+   if (references == NULL)
+   {
+      return NULL;
+   }
+
+   key = pgmoneta_append(key, reference_backup_id);
+   key = pgmoneta_append(key, "_");
+   key = pgmoneta_append(key, relative_path);
+
+   val = (char*)pgmoneta_art_search(references, key);
+   free(key);
+   return val;
+}
+
+static int
+create_file_link_placeholder(char* target_dir, char* relative_path, char* reference_backup_id)
+{
+   char* file_name = NULL;
+   char* link_name = NULL;
+   char link_path[MAX_PATH];
+   FILE* file = NULL;
+
+   memset(link_path, 0, MAX_PATH);
+
+   file_name = strrchr(relative_path, '/');
+   if (file_name != NULL)
+   {
+      file_name++;
+   }
+   else
+   {
+      file_name = relative_path;
+   }
+   link_name = pgmoneta_append(link_name, LINK_PREFIX);
+   link_name = pgmoneta_append(link_name, reference_backup_id);
+   link_name = pgmoneta_append(link_name, "_");
+   link_name = pgmoneta_append(link_name, file_name);
+
+   memcpy(link_path, target_dir, strlen(target_dir));
+   memcpy(link_path + strlen(link_path), relative_path, file_name - relative_path);
+   memcpy(link_path + strlen(link_path), link_name, strlen(link_name));
+
+   file = fopen(link_path, "w");
+   if (file == NULL)
+   {
+      pgmoneta_log_error("Unable to create link file %s: %s", link_path, strerror(errno));
+      errno = 0;
+      goto error;
+   }
+   fclose(file);
+
+   free(link_name);
+   return 0;
+error:
+   if (file != NULL)
+   {
+      fclose(file);
+   }
+   free(link_name);
    return 1;
 }
