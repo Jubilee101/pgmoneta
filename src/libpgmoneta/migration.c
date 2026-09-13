@@ -145,15 +145,10 @@ migrate_pgbackrest(char* source_dir, char* backup_id, char* server, char* worksp
       pgmoneta_log_info("Found backup info of %s, backup start time %lld", backup_id, bck->start_time);
    }
 
-   if (migrate_pgbackrest_backup(bck, cipher, workspace, source_dir, target_dir))
-   {
-      pgmoneta_log_error("Failed to migrate backup %s", bck->backup_id);
-      goto error;
-   }
-
    for (int i = 0; i < bck->backup_chain_size; i++)
    {
       char* parent_backup_id = bck->backup_chain[i];
+      pgmoneta_log_info("Start migrating parent backup %s", parent_backup_id);
       struct pgbackrest_backup_info* b = (struct pgbackrest_backup_info*)pgmoneta_art_search(backups, parent_backup_id);
       if (b == NULL)
       {
@@ -165,7 +160,16 @@ migrate_pgbackrest(char* source_dir, char* backup_id, char* server, char* worksp
          pgmoneta_log_error("Failed to migrate backup %s", b->backup_id);
          goto error;
       }
+      pgmoneta_log_info("Successfully migrated parent backup %s", parent_backup_id);
    }
+
+   pgmoneta_log_info("Start migrating backup %s", bck->backup_id);
+   if (migrate_pgbackrest_backup(bck, cipher, workspace, source_dir, target_dir))
+   {
+      pgmoneta_log_error("Failed to migrate backup %s", bck->backup_id);
+      goto error;
+   }
+   pgmoneta_log_info("Successfully migrated backup %s", bck->backup_id);
 
    free(cipher);
    free(target_dir);
@@ -546,7 +550,7 @@ migrate_pgbackrest_backup(struct pgbackrest_backup_info* backup_info, char* ciph
       }
    }
 
-   pgmoneta_log_info("pgmoneta-muse: backup %s successfully migrated to %s", backup_info->backup_id, target_backup_path);
+   pgmoneta_log_info("pgmoneta-muse: backup chain ending at %s successfully migrated to %s", backup_info->backup_id, target_backup_path);
    pgmoneta_art_iterator_destroy(iter);
    pgbackrest_manifest_destroy(manifest);
    free(target_backup_id);
@@ -821,6 +825,10 @@ migrate_pgbackrest_file(struct pgbackrest_backup_info* backup_info, struct pgbac
       {
          pgmoneta_log_error("Failed to get reference backup from manifest entry %s", relative_path);
          goto error;
+      }
+      if (pgmoneta_exists(source_file_path))
+      {
+         pgmoneta_log_info("found source file %s", source_file_path);
       }
    }
 
