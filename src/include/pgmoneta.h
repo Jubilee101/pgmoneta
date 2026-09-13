@@ -170,6 +170,7 @@ extern "C" {
 #define BULLET_POINT                 "- "
 
 #define INCREMENTAL_PREFIX           "INCREMENTAL."
+#define LINK_PREFIX                  "LINK_"
 
 #define JOBS_DIR                     ".jobs"
 #define TOOL_PGBACKREST              1
