@@ -38,18 +38,22 @@
 
 // system
 #include <assert.h>
+#include <ctype.h>
+#include <dirent.h>
 #include <errno.h>
 #include <libgen.h>
 #include <stdio.h>
 #include <time.h>
 
-#define PGBACKREST_BACKUP_INFO     "backup.info"
-#define PGBACKREST_BACKUP_MANIFEST "backup.manifest"
-#define CBC_DIGEST_DEFAULT         "sha1"
-#define BACKUP_ID_SIZE             15
-#define PG_DATA_PREFIX_LEN         strlen("pg_data/")
-#define PGBACKREST_FILE_REFERENCE  "reference"
-#define PGBACKREST_PASSWORD_KEY    "cipher-pass"
+#define PGBACKREST_BACKUP_INFO      "backup.info"
+#define PGBACKREST_BACKUP_MANIFEST  "backup.manifest"
+#define CBC_DIGEST_DEFAULT          "sha1"
+#define BACKUP_ID_SIZE              15
+#define PG_DATA_PREFIX_LEN          strlen("pg_data/")
+#define PGBACKREST_FILE_REFERENCE   "reference"
+#define PGBACKREST_PASSWORD_KEY     "cipher-pass"
+#define PGBACKREST_WAL_CHECKSUM_LEN 40
+#define WAL_SEGNAME_SIZE            24
 
 struct pgbackrest_backup_info
 {
@@ -93,6 +97,10 @@ static int create_file_directory(char* target_root_dir, char* workspace_root_dir
 static int insert_backup_file_referrer(char* reference_backup_id, char* relative_path, char* referrer_backup_id, struct art* references);
 static char* get_backup_file_referrer(char* reference_backup_id, char* relative_path, struct art* references);
 static int create_file_link_placeholder(char* target_dir, char* relative_path, char* reference_backup_id);
+static int migrate_wal_segments(char* source_dir, char* target_dir);
+static int extract_wal_segments(char* source_dir, char* target_dir);
+static bool is_wal_dir(char* dir);
+static int extract_wal_file_info(char* file_name, char** seg_name, int* compression);
 
 int
 pgmoneta_migrate(char* backup_id, char* server, char* workspace)
@@ -149,10 +157,7 @@ migrate_pgbackrest(char* source_data_dir, char* source_wal_dir, char* target_bas
    struct art* backups = NULL;
    struct art* references = NULL;
    struct pgbackrest_backup_info* bck = NULL;
-   // struct muse_configuration* config = NULL;
-   (void)source_wal_dir;
 
-   // config = (struct muse_configuration*)shmem;
    pgmoneta_log_info("Start migration from pgBackRest, workspace %s", workspace);
    pgmoneta_art_create(&references);
    build_target_dir(target_base_dir, server, &target_data_dir, &target_wal_dir);
@@ -188,7 +193,13 @@ migrate_pgbackrest(char* source_data_dir, char* source_wal_dir, char* target_bas
       pgmoneta_log_info("Found backup info of %s, backup start time %lld", backup_id, bck->start_time);
    }
 
-   //TODO: Move WAL segments
+   //Move WAL segments
+   pgmoneta_log_info("Migrating WAL segments from %s to %s", source_wal_dir, target_wal_dir);
+   if (migrate_wal_segments(source_wal_dir, target_wal_dir))
+   {
+      pgmoneta_log_error("Failed to migrate WAL segments from %s to %s", source_wal_dir, target_wal_dir);
+      goto error;
+   }
 
    for (int i = 0; i < bck->backup_chain_size; i++)
    {
@@ -1064,5 +1075,138 @@ error:
       fclose(file);
    }
    free(link_name);
+   return 1;
+}
+
+static int
+migrate_wal_segments(char* source_dir, char* target_dir)
+{
+   struct dirent* entry;
+   struct stat statbuf;
+   DIR* d = opendir(source_dir);
+   char* from = NULL;
+
+   if (d == NULL)
+   {
+      pgmoneta_log_error("Failed to open directory %s", source_dir);
+      goto error;
+   }
+
+   while (entry = readdir(d))
+   {
+      if (pgmoneta_compare_string(entry->d_name, ".") || pgmoneta_compare_string(entry->d_name, ".."))
+      {
+         continue;
+      }
+      from = pgmoneta_append(from, source_dir);
+      from = pgmoneta_append(from, entry->d_name);
+
+      if (!stat(from, &statbuf))
+      {
+         if (S_ISDIR(statbuf.st_mode) && is_wal_dir(entry->d_name))
+         {
+            from = pgmoneta_append(from, "/");
+            pgmoneta_log_info("Extracting WAL directory %s", from);
+            if (extract_wal_segments(from, target_dir))
+            {
+               pgmoneta_log_error("Failed to extract WAL segments from %s", from);
+               goto error;
+            }
+         }
+         else
+         {
+            pgmoneta_log_debug("Skipping directory/path %s", from);
+         }
+      }
+
+      free(from);
+      from = NULL;
+   }
+
+   if (d != NULL)
+   {
+      closedir(d);
+   }
+   free(from);
+   return 0;
+error:
+   if (d != NULL)
+   {
+      closedir(d);
+   }
+   free(from);
+   return 1;
+}
+
+static int
+extract_wal_segments(char* source_dir, char* target_dir)
+{
+   struct dirent* entry;
+   struct stat statbuf;
+   DIR* d = opendir(source_dir);
+   char* path = NULL;
+
+   while (entry = readdir(d))
+   {
+      if (pgmoneta_compare_string(entry->d_name, ".") || pgmoneta_compare_string(entry->d_name, ".."))
+      {
+         continue;
+      }
+
+      path = pgmoneta_append(path, source_dir);
+      path = pgmoneta_append(path, entry->d_name);
+
+      if (!stat(path, &statbuf))
+      {
+         if (S_ISREG(statbuf.st_mode))
+         {
+         }
+      }
+
+      free(path);
+      path = NULL;
+   }
+
+   if (d != NULL)
+   {
+      closedir(d);
+   }
+   free(path);
+   return 0;
+error:
+
+   if (d != NULL)
+   {
+      closedir(d);
+   }
+   free(path);
+   return 1;
+}
+
+static bool
+is_wal_dir(char* dir)
+{
+   if (strlen(dir) != 16)
+      return false;
+
+   for (int i = 0; i < 16; i++)
+   {
+      if (!isxdigit((unsigned char)dir[i]))
+      {
+         return false;
+      }
+   }
+   return true;
+}
+
+static int
+extract_wal_file_info(char* file_name, char** seg_name, int* compression)
+{
+   char buffer[MAX_PATH];
+   memset(buffer, 0, sizeof(buffer));
+   memcpy(buffer, file_name, strlen(file_name));
+
+      return 0;
+error:
    return 1;
 }
