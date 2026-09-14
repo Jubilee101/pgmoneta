@@ -2551,8 +2551,6 @@ pgmoneta_init_muse_configuration(void* shmem)
    config->common.log_mode = PGMONETA_LOGGING_MODE_APPEND;
    atomic_init(&config->common.log_lock, STATE_FREE);
 
-   config->source_compression = COMPRESSION_NONE;
-   config->source_encryption = ENCRYPTION_NONE;
    config->compression = COMPRESSION_NONE;
    config->encryption = ENCRYPTION_NONE;
    config->compression_level = 3;
@@ -2669,7 +2667,7 @@ pgmoneta_read_muse_configuration(void* shmem, char* filename)
                   goto error;
                }
             }
-            else if (pgmoneta_compare_string(key, CONFIGURATION_SOURCE_CIPHER))
+            else if (pgmoneta_compare_string(key, CONFIGURATION_SOURCE_PASSWORD))
             {
                max = strlen(value);
                if (max > MAX_PASSWORD_LENGTH - 1)
@@ -2677,7 +2675,7 @@ pgmoneta_read_muse_configuration(void* shmem, char* filename)
                   warnx("Cipher length of %d exceeds %d", (int)max, MAX_PASSWORD_LENGTH);
                   goto error;
                }
-               memcpy(config->source_cipher, value, max);
+               memcpy(config->source_password, value, max);
             }
             else if (pgmoneta_compare_string(key, CONFIGURATION_ARGUMENT_BASE_DIR))
             {
@@ -2688,29 +2686,6 @@ pgmoneta_read_muse_configuration(void* shmem, char* filename)
                   goto error;
                }
                memcpy(config->base_dir, value, max);
-            }
-            else if (pgmoneta_compare_string(key, CONFIGURATION_SOURCE_ENCRYPTION))
-            {
-               if (as_encryption_mode(value, &config->source_encryption))
-               {
-                  if (!strcasecmp(value, "aes-256-cbc"))
-                  {
-                     config->source_encryption = ENCRYPTION_AES_256_CBC;
-                  }
-                  else
-                  {
-                     warnx("Unknown source encryption mode: %s", value);
-                     goto error;
-                  }
-               }
-            }
-            else if (pgmoneta_compare_string(key, CONFIGURATION_SOURCE_COMPRESSION))
-            {
-               if (as_compression_mode(value, &config->source_compression))
-               {
-                  warnx("Unknown source compression mode: %s", value);
-                  goto error;
-               }
             }
             else if (pgmoneta_compare_string(key, CONFIGURATION_SOURCE_TOOL))
             {
@@ -2778,21 +2753,6 @@ pgmoneta_validate_muse_configuration(void* shmem, char* source_directory)
    if (strlen(config->base_dir) == 0 || !pgmoneta_exists(config->base_dir) || !pgmoneta_is_directory(config->base_dir))
    {
       pgmoneta_log_fatal("Unable to find base directory %s", config->base_dir);
-   }
-   if (config->source_encryption != ENCRYPTION_NONE)
-   {
-      if (strlen(config->source_cipher) == 0)
-      {
-         pgmoneta_log_fatal("Source cipher must be specified when the backups are encrypted");
-      }
-
-      if (config->source_tool == TOOL_PGBACKREST)
-      {
-         if (config->source_compression != ENCRYPTION_AES_256_CBC)
-         {
-            pgmoneta_log_fatal("pgBackRest only supports aes-256-cbc");
-         }
-      }
    }
    if (COMPRESSION_IS_SERVER(config->compression))
    {

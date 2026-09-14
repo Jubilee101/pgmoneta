@@ -68,24 +68,24 @@ struct pgbackrest_backup_info
 struct pgbackrest_manifest
 {
    int compression;
-   char* backup_cipher;
+   char* backup_password;
    struct art* files;
 };
 
-static int load_backup_info(char* source_dir, char* workspace, char** cipher, struct art** backup_info);
+static int load_backup_info(char* source_dir, char* workspace, char** password, struct art** backup_info);
 static void build_target_dir(char* source_dir, char* server, char** target_dir);
 static int migrate_pgbackrest(char* source_dir, char* backup_id, char* server, char* workspace);
 
-static int parse_pgbackrest_backup_info(char* path, char** cipher, struct art** backups);
+static int parse_pgbackrest_backup_info(char* path, char** password, struct art** backups);
 static int insert_pgbackrest_backup_info(char* backup_id, struct pgbackrest_backup_info* backup, struct art* backups);
 static int pgbackrest_backup_info_create(char* backup_id, struct json* info, struct pgbackrest_backup_info** backup);
 static void pgbackrest_backup_info_destroy(struct pgbackrest_backup_info* backup);
 static void pgbackrest_backup_info_destroy_cb(uintptr_t data);
 static void get_target_backup_id(time_t start_time, char** target_id);
-static int migrate_pgbackrest_backup(struct art* backups, struct pgbackrest_backup_info* backup_info, struct art* references, char* cipher, char* root_workspace, char* source_dir, char* target_dir);
+static int migrate_pgbackrest_backup(struct art* backups, struct pgbackrest_backup_info* backup_info, struct art* references, char* password, char* root_workspace, char* source_dir, char* target_dir);
 static void pgbackrest_manifest_create(struct pgbackrest_manifest** manifest);
 static void pgbackrest_manifest_destroy(struct pgbackrest_manifest* manifest);
-static int load_pgbackrest_manifest(char* cipher, char* source_backup_path, char* workspace, struct pgbackrest_manifest** manifest);
+static int load_pgbackrest_manifest(char* password, char* source_backup_path, char* workspace, struct pgbackrest_manifest** manifest);
 static int parse_pgbackrest_manifest(char* path, struct pgbackrest_manifest** manifest);
 static int migrate_pgbackrest_file(struct art* backups, struct pgbackrest_backup_info* backup_info, struct pgbackrest_manifest* manifest, struct art* references, char* relative_path, char* source_root_dir, char* target_root_dir, char* workspace_root_dir);
 static int create_file_directory(char* target_root_dir, char* workspace_root_dir, char* relative_path);
@@ -110,7 +110,7 @@ static int
 migrate_pgbackrest(char* source_dir, char* backup_id, char* server, char* workspace)
 {
    char* target_dir = NULL;
-   char* cipher = NULL;
+   char* password = NULL;
    struct art* backups = NULL;
    struct art* references = NULL;
    struct pgbackrest_backup_info* bck = NULL;
@@ -133,7 +133,7 @@ migrate_pgbackrest(char* source_dir, char* backup_id, char* server, char* worksp
       pgmoneta_log_error("Failed to create target directory at %s", target_dir);
       goto error;
    }
-   if (load_backup_info(source_dir, workspace, &cipher, &backups))
+   if (load_backup_info(source_dir, workspace, &password, &backups))
    {
       pgmoneta_log_error("Failed to load backup info");
    }
@@ -149,6 +149,8 @@ migrate_pgbackrest(char* source_dir, char* backup_id, char* server, char* worksp
       pgmoneta_log_info("Found backup info of %s, backup start time %lld", backup_id, bck->start_time);
    }
 
+   //TODO: Move WAL segments
+
    for (int i = 0; i < bck->backup_chain_size; i++)
    {
       char* parent_backup_id = bck->backup_chain[i];
@@ -159,7 +161,7 @@ migrate_pgbackrest(char* source_dir, char* backup_id, char* server, char* worksp
          pgmoneta_log_error("Failed to find parent backup %s", parent_backup_id);
          goto error;
       }
-      if (migrate_pgbackrest_backup(backups, b, references, cipher, workspace, source_dir, target_dir))
+      if (migrate_pgbackrest_backup(backups, b, references, password, workspace, source_dir, target_dir))
       {
          pgmoneta_log_error("Failed to migrate backup %s", b->backup_id);
          goto error;
@@ -168,14 +170,14 @@ migrate_pgbackrest(char* source_dir, char* backup_id, char* server, char* worksp
    }
 
    pgmoneta_log_info("Start migrating backup %s", bck->backup_id);
-   if (migrate_pgbackrest_backup(backups, bck, references, cipher, workspace, source_dir, target_dir))
+   if (migrate_pgbackrest_backup(backups, bck, references, password, workspace, source_dir, target_dir))
    {
       pgmoneta_log_error("Failed to migrate backup %s", bck->backup_id);
       goto error;
    }
    pgmoneta_log_info("Successfully migrated backup %s", bck->backup_id);
 
-   free(cipher);
+   free(password);
    free(target_dir);
    pgmoneta_art_destroy(references);
    pgmoneta_art_destroy(backups);
@@ -184,18 +186,18 @@ migrate_pgbackrest(char* source_dir, char* backup_id, char* server, char* worksp
 error:
    pgmoneta_delete_directory(target_dir);
    free(target_dir);
-   free(cipher);
+   free(password);
    pgmoneta_art_destroy(references);
    pgmoneta_art_destroy(backups);
    return 1;
 }
 
 static int
-load_backup_info(char* source_dir, char* workspace, char** cipher, struct art** backups)
+load_backup_info(char* source_dir, char* workspace, char** password, struct art** backups)
 {
    char* backup_info_path = NULL;
    char* dest = NULL;
-   size_t cipher_len = 0;
+   size_t password_len = 0;
    struct muse_configuration* conf = NULL;
 
    conf = (struct muse_configuration*)shmem;
@@ -205,14 +207,14 @@ load_backup_info(char* source_dir, char* workspace, char** cipher, struct art** 
    dest = pgmoneta_append(dest, workspace);
    dest = pgmoneta_append(dest, PGBACKREST_BACKUP_INFO);
 
-   cipher_len = strlen(conf->source_cipher);
+   password_len = strlen(conf->source_password);
 
    // TODO: handle the case where backup is not encrypted
    pgmoneta_log_info("Decrypting backup info from %s to %s", backup_info_path, dest);
    if (pgmoneta_cbc_decrypt_salted_file(CBC_DIGEST_DEFAULT,
                                         false,
-                                        (unsigned char*)conf->source_cipher,
-                                        cipher_len,
+                                        (unsigned char*)conf->source_password,
+                                        password_len,
                                         backup_info_path,
                                         dest))
    {
@@ -220,7 +222,7 @@ load_backup_info(char* source_dir, char* workspace, char** cipher, struct art** 
       goto error;
    }
 
-   if (parse_pgbackrest_backup_info(dest, cipher, backups))
+   if (parse_pgbackrest_backup_info(dest, password, backups))
    {
       pgmoneta_log_error("Failed to parse backup info at %s", dest);
       goto error;
@@ -248,7 +250,7 @@ build_target_dir(char* source_dir, char* server, char** target_dir)
 }
 
 static int
-parse_pgbackrest_backup_info(char* path, char** cipher, struct art** backups)
+parse_pgbackrest_backup_info(char* path, char** password, struct art** backups)
 {
    struct art* dict = NULL;
    struct json* backup_data = NULL;
@@ -258,7 +260,7 @@ parse_pgbackrest_backup_info(char* path, char** cipher, struct art** backups)
    char section[128];
    FILE* file = NULL;
 
-   *cipher = NULL;
+   *password = NULL;
    *backups = NULL;
 
    pgmoneta_art_create(&dict);
@@ -344,7 +346,7 @@ parse_pgbackrest_backup_info(char* path, char** cipher, struct art** backups)
       fclose(file);
    }
 
-   *cipher = ciph;
+   *password = ciph;
    *backups = dict;
    return 0;
 
@@ -491,7 +493,7 @@ get_target_backup_id(time_t start_time, char** target_id)
 }
 
 static int
-migrate_pgbackrest_backup(struct art* backups, struct pgbackrest_backup_info* backup_info, struct art* references, char* cipher, char* root_workspace, char* source_dir, char* target_dir)
+migrate_pgbackrest_backup(struct art* backups, struct pgbackrest_backup_info* backup_info, struct art* references, char* password, char* root_workspace, char* source_dir, char* target_dir)
 {
    char* target_backup_id = NULL;
    char source_backup_path[MAX_PATH];
@@ -537,7 +539,7 @@ migrate_pgbackrest_backup(struct art* backups, struct pgbackrest_backup_info* ba
       goto error;
    }
 
-   if (load_pgbackrest_manifest(cipher, source_backup_path, workspace, &manifest))
+   if (load_pgbackrest_manifest(password, source_backup_path, workspace, &manifest))
    {
       pgmoneta_log_error("Failed to load backup manifest %s%s", source_backup_path, PGBACKREST_BACKUP_MANIFEST);
       goto error;
@@ -555,6 +557,10 @@ migrate_pgbackrest_backup(struct art* backups, struct pgbackrest_backup_info* ba
          goto error;
       }
    }
+   //TODO: build backup_manifest
+   //TODO: build backup.info
+   //TODO: wf_migration: compress, encrypt,
+   //TODO: copy WAL segments
    pgmoneta_art_iterator_destroy(iter);
    pgbackrest_manifest_destroy(manifest);
    free(target_backup_id);
@@ -584,13 +590,13 @@ pgbackrest_manifest_destroy(struct pgbackrest_manifest* manifest)
    {
       return;
    }
-   free(manifest->backup_cipher);
+   free(manifest->backup_password);
    pgmoneta_art_destroy(manifest->files);
    free(manifest);
 }
 
 static int
-load_pgbackrest_manifest(char* cipher, char* source_backup_path, char* workspace, struct pgbackrest_manifest** manifest)
+load_pgbackrest_manifest(char* password, char* source_backup_path, char* workspace, struct pgbackrest_manifest** manifest)
 {
    char manifest_path[MAX_PATH];
    char dest[MAX_PATH];
@@ -607,8 +613,8 @@ load_pgbackrest_manifest(char* cipher, char* source_backup_path, char* workspace
    pgmoneta_log_info("decrypting %s to %s", manifest_path, dest);
    if (pgmoneta_cbc_decrypt_salted_file(CBC_DIGEST_DEFAULT,
                                         false,
-                                        (unsigned char*)cipher,
-                                        strlen(cipher),
+                                        (unsigned char*)password,
+                                        strlen(password),
                                         manifest_path,
                                         dest))
    {
@@ -699,7 +705,7 @@ parse_pgbackrest_manifest(char* path, struct pgbackrest_manifest** manifest)
       {
          // remove the double quotes
          value[strlen(value) - 1] = 0;
-         m->backup_cipher = pgmoneta_append(m->backup_cipher, &value[1]);
+         m->backup_password = pgmoneta_append(m->backup_password, &value[1]);
       }
       else if (pgmoneta_compare_string("option-compress-type", &key[0]))
       {
@@ -811,8 +817,8 @@ migrate_pgbackrest_file(struct art* backups, struct pgbackrest_backup_info* back
       // TODO: handle non encrypted case
       if (pgmoneta_cbc_decrypt_salted_file(CBC_DIGEST_DEFAULT,
                                            false,
-                                           (unsigned char*)manifest->backup_cipher,
-                                           strlen(manifest->backup_cipher),
+                                           (unsigned char*)manifest->backup_password,
+                                           strlen(manifest->backup_password),
                                            source_file_path,
                                            workspace_file_path))
       {
