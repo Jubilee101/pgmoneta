@@ -126,13 +126,13 @@ extern "C" {
 #define CONFIGURATION_ARGUMENT_SERVER                  "server"
 
 /* Muse configuration fields */
-#define CONFIGURATION_SOURCE_CIPHER      "source_cipher"
-#define CONFIGURATION_SOURCE_ENCRYPTION  "source_encryption"
-#define CONFIGURATION_SOURCE_COMPRESSION "source_compression"
-#define CONFIGURATION_SOURCE_TOOL        "source_tool"
+#define CONFIGURATION_SOURCE_PASSWORD "source_password"
+#define CONFIGURATION_SOURCE_TOOL     "source_tool"
+#define CONFIGURATION_SOURCE_DATA_DIR "source_data_dir"
+#define CONFIGURATION_SOURCE_WAL_DIR  "source_wal_dir"
 
-#define CONFIGURATION_TYPE_MAIN          0
-#define CONFIGURATION_TYPE_WALINFO       1
+#define CONFIGURATION_TYPE_MAIN       0
+#define CONFIGURATION_TYPE_WALINFO    1
 
 // Set configuration argument constants
 #define CONFIGURATION_RESPONSE_STATUS           "status"
