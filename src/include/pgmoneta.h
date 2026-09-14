@@ -581,7 +581,7 @@ struct muse_configuration
    int output_format;                        /**< Default output format for the outcome */
    char workspace[MAX_PATH];                 /**< A workspace for migration */
    char source_data_dir[MAX_PATH];           /**< The direct source data directory */
-   char source_wal_dir[MAX_PATH]             /**< The direct source WAL directory */
+   char source_wal_dir[MAX_PATH];            /**< The direct source WAL directory */
 } __attribute__((aligned(64)));
 
 #ifdef __cplusplus

@@ -126,13 +126,13 @@ extern "C" {
 #define CONFIGURATION_ARGUMENT_SERVER                  "server"
 
 /* Muse configuration fields */
-#define CONFIGURATION_SOURCE_PASSWORD "source_password"
-#define CONFIGURATION_SOURCE_TOOL     "source_tool"
-#define CONFIGURATION_SOURCE_DATA_DIR "source_data_dir"
-#define CONFIGURATION_SOURCE_WAL_DIR  "source_wal_dir"
+#define CONFIGURATION_ARGUMENT_SOURCE_PASSWORD "source_password"
+#define CONFIGURATION_ARGUMENT_SOURCE_TOOL     "source_tool"
+#define CONFIGURATION_ARGUMENT_SOURCE_DATA_DIR "source_data_dir"
+#define CONFIGURATION_ARGUMENT_SOURCE_WAL_DIR  "source_wal_dir"
 
-#define CONFIGURATION_TYPE_MAIN       0
-#define CONFIGURATION_TYPE_WALINFO    1
+#define CONFIGURATION_TYPE_MAIN                0
+#define CONFIGURATION_TYPE_WALINFO             1
 
 // Set configuration argument constants
 #define CONFIGURATION_RESPONSE_STATUS           "status"
@@ -335,7 +335,7 @@ int
 pgmoneta_read_muse_configuration(void* shmem, char* filename);
 
 int
-pgmoneta_validate_muse_configuration(void* shmem, char* source_directory);
+pgmoneta_validate_muse_configuration(void* shmem);
 
 /**
  * Get a configuration parameter value

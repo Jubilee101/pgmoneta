@@ -2483,7 +2483,7 @@ pgmoneta_read_muse_configuration(void* shmem, char* filename)
                   goto error;
                }
             }
-            else if (pgmoneta_compare_string(key, CONFIGURATION_SOURCE_PASSWORD))
+            else if (pgmoneta_compare_string(key, CONFIGURATION_ARGUMENT_SOURCE_PASSWORD))
             {
                max = strlen(value);
                if (max > MAX_PASSWORD_LENGTH - 1)
@@ -2503,7 +2503,27 @@ pgmoneta_read_muse_configuration(void* shmem, char* filename)
                }
                memcpy(config->base_dir, value, max);
             }
-            else if (pgmoneta_compare_string(key, CONFIGURATION_SOURCE_TOOL))
+            else if (pgmoneta_compare_string(key, CONFIGURATION_ARGUMENT_SOURCE_DATA_DIR))
+            {
+               max = strlen(value);
+               if (max > MAX_PATH - 1)
+               {
+                  warnx("Base directory length of %d exceeds %d", (int)max, MAX_PATH);
+                  goto error;
+               }
+               memcpy(config->source_data_dir, value, max);
+            }
+            else if (pgmoneta_compare_string(key, CONFIGURATION_ARGUMENT_SOURCE_WAL_DIR))
+            {
+               max = strlen(value);
+               if (max > MAX_PATH - 1)
+               {
+                  warnx("Base directory length of %d exceeds %d", (int)max, MAX_PATH);
+                  goto error;
+               }
+               memcpy(config->source_wal_dir, value, max);
+            }
+            else if (pgmoneta_compare_string(key, CONFIGURATION_ARGUMENT_SOURCE_TOOL))
             {
                if (pgmoneta_compare_string(value, "pgbackrest"))
                {
@@ -2561,26 +2581,38 @@ error:
 }
 
 int
-pgmoneta_validate_muse_configuration(void* shmem, char* source_directory)
+pgmoneta_validate_muse_configuration(void* shmem)
 {
    struct muse_configuration* config = NULL;
 
    config = (struct muse_configuration*)shmem;
    if (strlen(config->base_dir) == 0 || !pgmoneta_exists(config->base_dir) || !pgmoneta_is_directory(config->base_dir))
    {
-      pgmoneta_log_fatal("Unable to find base directory %s", config->base_dir);
+      errx(1, "Unable to find base directory %s", config->base_dir);
+   }
+   if (strlen(config->source_data_dir) == 0 || !pgmoneta_exists(config->source_data_dir) || !pgmoneta_is_directory(config->source_data_dir))
+   {
+      errx(1, "Unable to find source data directory %s", config->source_data_dir);
+   }
+   if (strlen(config->source_wal_dir) == 0 || !pgmoneta_exists(config->source_wal_dir) || !pgmoneta_is_directory(config->source_wal_dir))
+   {
+      errx(1, "Unable to find source WAL directory %s", config->source_wal_dir);
    }
    if (COMPRESSION_IS_SERVER(config->compression))
    {
-      pgmoneta_log_fatal("Server side compression is not supported during migration");
+      errx(1, "Server side compression is not supported during migration");
    }
    if (config->source_tool == 0)
    {
-      pgmoneta_log_fatal("Source backup tool must be specified");
+      errx(1, "Source backup tool must be specified");
    }
-   if (pgmoneta_starts_with(config->base_dir, source_directory))
+   if (pgmoneta_starts_with(config->base_dir, config->source_data_dir))
    {
-      pgmoneta_log_fatal("Target base directory cannot be sub-directory of source repository");
+      errx(1, "Target base directory cannot be sub-directory of source data repository");
+   }
+   if (pgmoneta_starts_with(config->base_dir, config->source_wal_dir))
+   {
+      errx(1, "Target base directory cannot be sub-directory of source WAL repository");
    }
    return 0;
 }

@@ -49,6 +49,7 @@
 #define BACKUP_ID_SIZE             15
 #define PG_DATA_PREFIX_LEN         strlen("pg_data/")
 #define PGBACKREST_FILE_REFERENCE  "reference"
+#define PGBACKREST_PASSWORD_KEY    "cipher-pass"
 
 struct pgbackrest_backup_info
 {
@@ -73,8 +74,8 @@ struct pgbackrest_manifest
 };
 
 static int load_backup_info(char* source_dir, char* workspace, char** password, struct art** backup_info);
-static void build_target_dir(char* source_dir, char* server, char** target_dir);
-static int migrate_pgbackrest(char* source_dir, char* backup_id, char* server, char* workspace);
+static void build_target_dir(char* source_dir, char* server, char** target_data_dir, char** target_wal_dir);
+static int migrate_pgbackrest(char* source_data_dir, char* source_wal_dir, char* target_base_dir, char* backup_id, char* server, char* workspace);
 
 static int parse_pgbackrest_backup_info(char* path, char** password, struct art** backups);
 static int insert_pgbackrest_backup_info(char* backup_id, struct pgbackrest_backup_info* backup, struct art* backups);
@@ -94,46 +95,84 @@ static char* get_backup_file_referrer(char* reference_backup_id, char* relative_
 static int create_file_link_placeholder(char* target_dir, char* relative_path, char* reference_backup_id);
 
 int
-pgmoneta_migrate(char* source_dir, char* backup_id, char* server, char* workspace)
+pgmoneta_migrate(char* backup_id, char* server, char* workspace)
 {
    struct muse_configuration* config = NULL;
+   char* source_data_dir = NULL;
+   char* source_wal_dir = NULL;
+   char* target_base_dir = NULL;
 
    config = (struct muse_configuration*)shmem;
+
+   source_data_dir = pgmoneta_append(source_data_dir, config->source_data_dir);
+   if (!pgmoneta_ends_with(source_data_dir, "/"))
+   {
+      source_data_dir = pgmoneta_append(source_data_dir, "/");
+   }
+
+   source_wal_dir = pgmoneta_append(source_wal_dir, config->source_wal_dir);
+   if (!pgmoneta_ends_with(source_wal_dir, "/"))
+   {
+      source_wal_dir = pgmoneta_append(source_wal_dir, "/");
+   }
+
+   target_base_dir = pgmoneta_append(target_base_dir, config->base_dir);
+   if (!pgmoneta_ends_with(target_base_dir, "/"))
+   {
+      target_base_dir = pgmoneta_append(target_base_dir, "/");
+   }
+
    if (config->source_tool == TOOL_PGBACKREST)
    {
-      return migrate_pgbackrest(source_dir, backup_id, server, workspace);
+      if (migrate_pgbackrest(source_data_dir, source_wal_dir, target_base_dir, backup_id, server, workspace))
+      {
+         goto error;
+      }
    }
+   free(source_data_dir);
+   free(source_wal_dir);
+   free(target_base_dir);
    return 0;
+error:
+   free(source_data_dir);
+   free(source_wal_dir);
+   free(target_base_dir);
+   return 1;
 }
 
 static int
-migrate_pgbackrest(char* source_dir, char* backup_id, char* server, char* workspace)
+migrate_pgbackrest(char* source_data_dir, char* source_wal_dir, char* target_base_dir, char* backup_id, char* server, char* workspace)
 {
-   char* target_dir = NULL;
+   char* target_data_dir = NULL;
+   char* target_wal_dir = NULL;
    char* password = NULL;
    struct art* backups = NULL;
    struct art* references = NULL;
    struct pgbackrest_backup_info* bck = NULL;
    // struct muse_configuration* config = NULL;
+   (void)source_wal_dir;
 
    // config = (struct muse_configuration*)shmem;
    pgmoneta_log_info("Start migration from pgBackRest, workspace %s", workspace);
    pgmoneta_art_create(&references);
-   build_target_dir(source_dir, server, &target_dir);
-   if (pgmoneta_exists(target_dir))
+   build_target_dir(target_base_dir, server, &target_data_dir, &target_wal_dir);
+   if (pgmoneta_exists(target_data_dir))
    {
-      if (pgmoneta_delete_directory(target_dir))
+      if (pgmoneta_delete_directory(target_data_dir))
       {
-         pgmoneta_log_error("Failed to clean up target directory %s", target_dir);
+         pgmoneta_log_error("Failed to clean up target data directory %s", target_data_dir);
+         goto error;
       }
    }
-   pgmoneta_log_info("Creating backup directory %s", target_dir);
-   if (pgmoneta_mkdir(target_dir))
+
+   pgmoneta_log_info("Creating backup directory %s and %s", target_data_dir, target_wal_dir);
+   if (pgmoneta_mkdir(target_data_dir))
    {
-      pgmoneta_log_error("Failed to create target directory at %s", target_dir);
+      pgmoneta_log_error("Failed to create target data directory at %s", target_data_dir);
       goto error;
    }
-   if (load_backup_info(source_dir, workspace, &password, &backups))
+
+   if (load_backup_info(source_data_dir, workspace, &password, &backups))
    {
       pgmoneta_log_error("Failed to load backup info");
    }
@@ -161,7 +200,7 @@ migrate_pgbackrest(char* source_dir, char* backup_id, char* server, char* worksp
          pgmoneta_log_error("Failed to find parent backup %s", parent_backup_id);
          goto error;
       }
-      if (migrate_pgbackrest_backup(backups, b, references, password, workspace, source_dir, target_dir))
+      if (migrate_pgbackrest_backup(backups, b, references, password, workspace, source_data_dir, target_data_dir))
       {
          pgmoneta_log_error("Failed to migrate backup %s", b->backup_id);
          goto error;
@@ -170,7 +209,7 @@ migrate_pgbackrest(char* source_dir, char* backup_id, char* server, char* worksp
    }
 
    pgmoneta_log_info("Start migrating backup %s", bck->backup_id);
-   if (migrate_pgbackrest_backup(backups, bck, references, password, workspace, source_dir, target_dir))
+   if (migrate_pgbackrest_backup(backups, bck, references, password, workspace, source_data_dir, target_data_dir))
    {
       pgmoneta_log_error("Failed to migrate backup %s", bck->backup_id);
       goto error;
@@ -178,14 +217,17 @@ migrate_pgbackrest(char* source_dir, char* backup_id, char* server, char* worksp
    pgmoneta_log_info("Successfully migrated backup %s", bck->backup_id);
 
    free(password);
-   free(target_dir);
+   free(target_data_dir);
+   free(target_wal_dir);
    pgmoneta_art_destroy(references);
    pgmoneta_art_destroy(backups);
    return 0;
 
 error:
-   pgmoneta_delete_directory(target_dir);
-   free(target_dir);
+   pgmoneta_delete_directory(target_data_dir);
+   pgmoneta_delete_directory(target_wal_dir);
+   free(target_data_dir);
+   free(target_wal_dir);
    free(password);
    pgmoneta_art_destroy(references);
    pgmoneta_art_destroy(backups);
@@ -238,15 +280,23 @@ error:
 }
 
 static void
-build_target_dir(char* source_dir, char* server, char** target_dir)
+build_target_dir(char* source_dir, char* server, char** target_data_dir, char** target_wal_dir)
 {
-   char* dir = NULL;
-   *target_dir = NULL;
+   char* ddir = NULL;
+   char* wdir = NULL;
+   *target_data_dir = NULL;
+   *target_wal_dir = NULL;
 
-   dir = pgmoneta_append(dir, source_dir);
-   dir = pgmoneta_append(dir, server);
-   dir = pgmoneta_append(dir, "/backup/");
-   *target_dir = dir;
+   ddir = pgmoneta_append(ddir, source_dir);
+   ddir = pgmoneta_append(ddir, server);
+   ddir = pgmoneta_append(ddir, "/backup/");
+
+   wdir = pgmoneta_append(wdir, source_dir);
+   wdir = pgmoneta_append(wdir, server);
+   wdir = pgmoneta_append(wdir, "/wal/");
+
+   *target_data_dir = ddir;
+   *target_wal_dir = wdir;
 }
 
 static int
@@ -255,7 +305,7 @@ parse_pgbackrest_backup_info(char* path, char** password, struct art** backups)
    struct art* dict = NULL;
    struct json* backup_data = NULL;
    struct pgbackrest_backup_info* bck = NULL;
-   char* ciph = NULL;
+   char* pass = NULL;
    char buffer[INFO_BUFFER_SIZE];
    char section[128];
    FILE* file = NULL;
@@ -333,11 +383,11 @@ parse_pgbackrest_backup_info(char* path, char** password, struct art** backups)
          pgmoneta_json_destroy(backup_data);
          backup_data = NULL;
       }
-      else if (pgmoneta_compare_string("cipher-pass", &key[0]))
+      else if (pgmoneta_compare_string(PGBACKREST_PASSWORD_KEY, &key[0]))
       {
          // remove the double quotes
          value[strlen(value) - 1] = 0;
-         ciph = pgmoneta_append(ciph, &value[1]);
+         pass = pgmoneta_append(pass, &value[1]);
       }
    }
 
@@ -346,7 +396,7 @@ parse_pgbackrest_backup_info(char* path, char** password, struct art** backups)
       fclose(file);
    }
 
-   *password = ciph;
+   *password = pass;
    *backups = dict;
    return 0;
 
@@ -357,7 +407,7 @@ error:
       fclose(file);
    }
 
-   free(ciph);
+   free(pass);
    pgmoneta_art_destroy(dict);
    pgmoneta_json_destroy(backup_data);
    pgbackrest_backup_info_destroy(bck);
@@ -701,7 +751,7 @@ parse_pgbackrest_manifest(char* path, struct pgbackrest_manifest** manifest)
          pgmoneta_art_insert(m->files, &key[PG_DATA_PREFIX_LEN], (uintptr_t)file_info, ValueJSON);
          file_info = NULL;
       }
-      else if (pgmoneta_compare_string("cipher-pass", &key[0]))
+      else if (pgmoneta_compare_string(PGBACKREST_PASSWORD_KEY, &key[0]))
       {
          // remove the double quotes
          value[strlen(value) - 1] = 0;
