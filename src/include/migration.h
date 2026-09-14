@@ -36,7 +36,7 @@ extern "C" {
 #include <pgmoneta.h>
 
 int
-pgmoneta_migrate(char* source_dir, char* backup_id, char* server, char* workspace);
+pgmoneta_migrate(char* backup_id, char* server, char* workspace);
 
 #ifdef __cplusplus
 }

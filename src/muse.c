@@ -60,8 +60,6 @@ main(int argc, char** argv)
    char* backup_id = NULL;
    char* configuration_path = NULL;
    char* logfile = NULL;
-   char* directory = NULL;
-   char* source_dir = NULL;
    char* server_name = NULL;
    char* workspace = NULL;
 
@@ -71,7 +69,6 @@ main(int argc, char** argv)
       {"d", "dry-run", false},
       {"c", "config", true},
       {"b", "backup-id", true},
-      {"D", "directory", true},
       {"L", "logfile", true},
       {"s", "server", true},
       {"V", "version", false},
@@ -102,10 +99,6 @@ main(int argc, char** argv)
       {
          configuration_path = optarg;
       }
-      else if (match_opt(optname, "D", "directory"))
-      {
-         directory = optarg;
-      }
       else if (match_opt(optname, "b", "backup-id"))
       {
          backup_id = optarg;
@@ -130,26 +123,6 @@ main(int argc, char** argv)
    }
 
    // argument validation
-   if (directory == NULL)
-   {
-      errx(1, "Source backup directory needs to be specified");
-   }
-   else if (!pgmoneta_exists(directory) || !pgmoneta_is_directory(directory))
-   {
-      errx(1, "Unable to find source directory %s", directory);
-   }
-
-   if (backup_id != NULL)
-   {
-      if (!backup_exists(directory, backup_id))
-      {
-         errx(1, "Unable to find backup %s at %s", backup_id, directory);
-      }
-   }
-   else
-   {
-      errx(1, "Must specify the ending backup");
-   }
 
    if (server_name == NULL)
    {
@@ -197,9 +170,20 @@ main(int argc, char** argv)
       errx(1, "pgmoneta-muse: Failed to read configuration file: %s", configuration_path);
    }
 
-   pgmoneta_validate_muse_configuration(shmem, directory);
+   pgmoneta_validate_muse_configuration(shmem);
 
    config = (struct muse_configuration*)shmem;
+   if (backup_id != NULL)
+   {
+      if (!backup_exists(config->source_data_dir, backup_id))
+      {
+         errx(1, "Unable to find backup %s at %s", backup_id, config->source_data_dir);
+      }
+   }
+   else
+   {
+      errx(1, "Must specify the ending backup");
+   }
 
    if (logfile)
    {
@@ -219,15 +203,9 @@ main(int argc, char** argv)
       errx(1, "pgmoneta-muse: Unable to start logging");
    }
 
-   source_dir = pgmoneta_append(source_dir, directory);
-   if (!pgmoneta_ends_with(source_dir, "/"))
+   if (pgmoneta_migrate(backup_id, server_name, workspace))
    {
-      source_dir = pgmoneta_append(source_dir, "/");
-   }
-
-   if (pgmoneta_migrate(directory, backup_id, server_name, workspace))
-   {
-      pgmoneta_log_error("Failed to migrate source directory %s", directory);
+      pgmoneta_log_error("Failed to migrate source directory");
    }
 
    pgmoneta_log_info("pgmoneta-muse: migration finished");
@@ -235,10 +213,8 @@ main(int argc, char** argv)
    pgmoneta_stop_logging();
    pgmoneta_destroy_shared_memory(shmem, sizeof(struct muse_configuration));
 
-   // TODO: uncomment to cleanup
-   // pgmoneta_delete_directory(workspace);
+   pgmoneta_delete_directory(workspace);
 
-   free(source_dir);
    free(workspace);
    return 0;
 }
@@ -264,11 +240,10 @@ usage(void)
    printf("\n");
 
    printf("Usage:\n");
-   printf("  pgmoneta-muse {-D DIRECTORY} {-s SERVER} {-b BACKUP_ID} [ -c CONFIG_FILE ]\n");
+   printf("  pgmoneta-muse {-s SERVER} {-b BACKUP_ID} [ -c CONFIG_FILE ]\n");
    printf("\n");
    printf("Options:\n");
    printf("  -c, --config CONFIG_FILE  Set the path to the pgmoneta_muse.conf file\n");
-   printf("  -D, --directory DIRECTORY Set the path to the backup directory\n");
    printf("  -b, --backup-id BACKUP_ID The final backup in the backup chain, all backups in the chain will be migrated\n");
    printf("  -L, --logfile FILE        Set the log file\n");
    printf("  -s, --server SERVER       Set the target server name the backups correspond to post migration\n");
