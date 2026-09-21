@@ -1092,7 +1092,7 @@ migrate_wal_segments(char* source_dir, char* target_dir)
       goto error;
    }
 
-   while (entry = readdir(d))
+   while ((entry = readdir(d)))
    {
       if (pgmoneta_compare_string(entry->d_name, ".") || pgmoneta_compare_string(entry->d_name, ".."))
       {
@@ -1145,10 +1145,17 @@ extract_wal_segments(char* source_dir, char* target_dir)
    struct stat statbuf;
    DIR* d = opendir(source_dir);
    char* path = NULL;
+   char* target_path = NULL;
+   char* seg_name = NULL;
+   int compression = COMPRESSION_NONE;
 
-   while (entry = readdir(d))
+   (void)target_dir;
+
+   while ((entry = readdir(d)))
    {
-      if (pgmoneta_compare_string(entry->d_name, ".") || pgmoneta_compare_string(entry->d_name, ".."))
+      if (pgmoneta_compare_string(entry->d_name, ".") ||
+          pgmoneta_compare_string(entry->d_name, "..") ||
+          pgmoneta_ends_with(entry->d_name, ".backup"))
       {
          continue;
       }
@@ -1160,11 +1167,18 @@ extract_wal_segments(char* source_dir, char* target_dir)
       {
          if (S_ISREG(statbuf.st_mode))
          {
+            if (extract_wal_file_info(entry->d_name, &seg_name, &compression))
+            {
+               pgmoneta_log_error("Failed to extract WAL file info from %s", entry->d_name);
+               goto error;
+            }
          }
       }
 
       free(path);
+      free(seg_name);
       path = NULL;
+      seg_name = NULL;
    }
 
    if (d != NULL)
@@ -1172,6 +1186,7 @@ extract_wal_segments(char* source_dir, char* target_dir)
       closedir(d);
    }
    free(path);
+   free(seg_name);
    return 0;
 error:
 
@@ -1180,6 +1195,7 @@ error:
       closedir(d);
    }
    free(path);
+   free(seg_name);
    return 1;
 }
 
@@ -1202,11 +1218,56 @@ is_wal_dir(char* dir)
 static int
 extract_wal_file_info(char* file_name, char** seg_name, int* compression)
 {
+   // example wal file name: 00000001000000000000006A-6df4da8ba173143537d03dcc41e3e8bf72360cc9.gz
    char buffer[MAX_PATH];
+   char* token = NULL;
+   char* subtoken = NULL;
+   char* seg = NULL;
+   char* saveptr1 = NULL;
+   char* saveptr2 = NULL;
+   int c = COMPRESSION_NONE;
    memset(buffer, 0, sizeof(buffer));
    memcpy(buffer, file_name, strlen(file_name));
 
-      return 0;
+   token = strtok_r(buffer, ".", &saveptr1);
+   if (token == NULL)
+   {
+      pgmoneta_log_error("Failed to tokenize file name %s", file_name);
+      goto error;
+   }
+   subtoken = strtok_r(token, "-", &saveptr2);
+   if (subtoken == NULL)
+   {
+      pgmoneta_log_error("Failed to tokenize file name token %s", token);
+      goto error;
+   }
+
+   seg = pgmoneta_append(seg, subtoken);
+   token = strtok_r(NULL, ".", &saveptr1);
+   if (token != NULL)
+   {
+      if (pgmoneta_compare_string(token, "gz"))
+      {
+         c = COMPRESSION_CLIENT_GZIP;
+      }
+      else if (pgmoneta_compare_string(token, "bz2"))
+      {
+         c = COMPRESSION_CLIENT_BZIP2;
+      }
+      else if (pgmoneta_compare_string(token, "lz4"))
+      {
+         c = COMPRESSION_CLIENT_LZ4;
+      }
+      else if (pgmoneta_compare_string(token, "zst"))
+      {
+         c = COMPRESSION_CLIENT_ZSTD;
+      }
+   }
+
+   *seg_name = seg;
+   *compression = c;
+   return 0;
 error:
+   free(seg);
    return 1;
 }
