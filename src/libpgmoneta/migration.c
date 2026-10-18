@@ -94,7 +94,7 @@ static int load_pgbackrest_manifest(char* password, char* source_backup_path, ch
 static int parse_pgbackrest_manifest(char* path, struct pgbackrest_manifest** manifest);
 static int migrate_pgbackrest_file(struct art* backups, struct pgbackrest_backup_info* backup_info, struct pgbackrest_manifest* manifest, char* relative_path, char* source_root_dir, char* target_root_dir, char* workspace_root_dir);
 static int create_file_directory(char* target_root_dir, char* workspace_root_dir, char* relative_path);
-static int create_file_link_placeholder(char* target_dir, char* relative_path, char* reference_backup_id);
+static int create_file_placeholder(char* target_path);
 static int migrate_wal_segments(char* source_dir, char* target_dir);
 static int extract_wal_segments(char* source_dir, char* target_dir);
 static bool is_wal_dir(char* dir);
@@ -816,10 +816,7 @@ migrate_pgbackrest_file(struct art* backups, struct pgbackrest_backup_info* back
    char* target_file_path = NULL;
    char* workspace_file_path = NULL;
    struct json* file_info = NULL;
-   char* reference_backup = NULL;
    char* target_backup_id = NULL;
-   char* reference_backup_id = NULL;
-   struct pgbackrest_backup_info* reference_backup_info = NULL;
 
    source_file_path = pgmoneta_append(source_file_path, source_root_dir);
    source_file_path = pgmoneta_append(source_file_path, relative_path);
@@ -887,23 +884,9 @@ migrate_pgbackrest_file(struct art* backups, struct pgbackrest_backup_info* back
    }
    else
    {
-      reference_backup = (char*)pgmoneta_json_get(file_info, PGBACKREST_FILE_REFERENCE);
-      if (reference_backup == NULL)
+      if (create_file_placeholder(target_file_path))
       {
-         pgmoneta_log_error("Failed to get reference backup from manifest entry %s", relative_path);
-         goto error;
-      }
-
-      reference_backup_info = (struct pgbackrest_backup_info*)pgmoneta_art_search(backups, reference_backup);
-      if (reference_backup_info == NULL)
-      {
-         pgmoneta_log_error("Failed to find referenced backup %s", reference_backup);
-         goto error;
-      }
-      get_target_backup_id(reference_backup_info->start_time, &reference_backup_id);
-      if (create_file_link_placeholder(target_root_dir, relative_path, reference_backup_id))
-      {
-         pgmoneta_log_error("Failed to create placeholder for file %s referencing %s", relative_path, reference_backup);
+         pgmoneta_log_error("Failed to create placeholder for file %s ", target_file_path);
          goto error;
       }
    }
@@ -912,14 +895,12 @@ migrate_pgbackrest_file(struct art* backups, struct pgbackrest_backup_info* back
    free(target_file_path);
    free(workspace_file_path);
    free(target_backup_id);
-   free(reference_backup_id);
    return 0;
 error:
    free(source_file_path);
    free(target_file_path);
    free(workspace_file_path);
    free(target_backup_id);
-   free(reference_backup_id);
    return 1;
 }
 
@@ -964,50 +945,23 @@ error:
 }
 
 static int
-create_file_link_placeholder(char* target_dir, char* relative_path, char* reference_backup_id)
+create_file_placeholder(char* target_path)
 {
-   char* file_name = NULL;
-   char* link_name = NULL;
-   char link_path[MAX_PATH];
    FILE* file = NULL;
-
-   memset(link_path, 0, MAX_PATH);
-
-   file_name = strrchr(relative_path, '/');
-   if (file_name != NULL)
-   {
-      file_name++;
-   }
-   else
-   {
-      file_name = relative_path;
-   }
-   link_name = pgmoneta_append(link_name, LINK_PREFIX);
-   link_name = pgmoneta_append(link_name, reference_backup_id);
-   link_name = pgmoneta_append(link_name, "_");
-   link_name = pgmoneta_append(link_name, file_name);
-
-   memcpy(link_path, target_dir, strlen(target_dir));
-   memcpy(link_path + strlen(link_path), relative_path, file_name - relative_path);
-   memcpy(link_path + strlen(link_path), link_name, strlen(link_name));
-
-   file = fopen(link_path, "w");
+   file = fopen(target_path, "w");
    if (file == NULL)
    {
-      pgmoneta_log_error("Unable to create link file %s: %s", link_path, strerror(errno));
+      pgmoneta_log_error("Unable to create placeholder file %s: %s", target_path, strerror(errno));
       errno = 0;
       goto error;
    }
    fclose(file);
-
-   free(link_name);
    return 0;
 error:
    if (file != NULL)
    {
       fclose(file);
    }
-   free(link_name);
    return 1;
 }
 
