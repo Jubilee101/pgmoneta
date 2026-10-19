@@ -54,6 +54,7 @@
 #define PGBACKREST_PASSWORD_KEY     "cipher-pass"
 #define PGBACKREST_WAL_CHECKSUM_LEN 40
 #define WAL_SEGNAME_SIZE            24
+#define PG_WAL_DIR                  "pg_wal/"
 
 struct pgbackrest_backup_info
 {
@@ -83,22 +84,25 @@ static int migrate_pgbackrest(char* source_data_dir, char* source_wal_dir, char*
 
 static int parse_pgbackrest_backup_info(char* path, char** password, struct art** backups);
 static int insert_pgbackrest_backup_info(char* backup_id, struct pgbackrest_backup_info* backup, struct art* backups);
+static int pgbackrest_backup_info_validate(struct pgbackrest_backup_info* bck);
 static int pgbackrest_backup_info_create(char* backup_id, struct json* info, struct pgbackrest_backup_info** backup);
 static void pgbackrest_backup_info_destroy(struct pgbackrest_backup_info* backup);
 static void pgbackrest_backup_info_destroy_cb(uintptr_t data);
 static void get_target_backup_id(time_t start_time, char** target_id);
-static int migrate_pgbackrest_backup(struct art* backups, struct pgbackrest_backup_info* backup_info, char* password, char* root_workspace, char* source_dir, char* target_dir);
+static int migrate_pgbackrest_backup(struct pgbackrest_backup_info* backup_info, char* password, char* root_workspace, char* source_dir, char* target_data_dir, char* target_wal_dir);
 static void pgbackrest_manifest_create(struct pgbackrest_manifest** manifest);
 static void pgbackrest_manifest_destroy(struct pgbackrest_manifest* manifest);
+static int pgbackrest_manifest_validate(struct pgbackrest_manifest* manifest);
 static int load_pgbackrest_manifest(char* password, char* source_backup_path, char* workspace, struct pgbackrest_manifest** manifest);
 static int parse_pgbackrest_manifest(char* path, struct pgbackrest_manifest** manifest);
-static int migrate_pgbackrest_file(struct art* backups, struct pgbackrest_backup_info* backup_info, struct pgbackrest_manifest* manifest, char* relative_path, char* source_root_dir, char* target_root_dir, char* workspace_root_dir);
+static int migrate_pgbackrest_file(struct pgbackrest_backup_info* backup_info, struct pgbackrest_manifest* manifest, char* relative_path, char* source_root_dir, char* target_root_dir, char* workspace_root_dir);
 static int create_file_directory(char* target_root_dir, char* workspace_root_dir, char* relative_path);
 static int create_file_placeholder(char* target_path);
 static int migrate_wal_segments(char* source_dir, char* target_dir);
 static int extract_wal_segments(char* source_dir, char* target_dir);
 static bool is_wal_dir(char* dir);
 static int extract_wal_file_info(char* file_name, char** seg_name, int* compression);
+static int pgbackrest_handle_pg_wal(char* wal_dir, char* target_backup_data_path, char* wal_start, char* wal_stop);
 
 int
 pgmoneta_migrate(char* backup_id, char* server, char* workspace)
@@ -207,7 +211,7 @@ migrate_pgbackrest(char* source_data_dir, char* source_wal_dir, char* target_bas
          pgmoneta_log_error("Failed to find parent backup %s", parent_backup_id);
          goto error;
       }
-      if (migrate_pgbackrest_backup(backups, b, password, workspace, source_data_dir, target_data_dir))
+      if (migrate_pgbackrest_backup(b, password, workspace, source_data_dir, target_data_dir, target_wal_dir))
       {
          pgmoneta_log_error("Failed to migrate backup %s", b->backup_id);
          goto error;
@@ -216,12 +220,14 @@ migrate_pgbackrest(char* source_data_dir, char* source_wal_dir, char* target_bas
    }
 
    pgmoneta_log_info("Start migrating backup %s", bck->backup_id);
-   if (migrate_pgbackrest_backup(backups, bck, password, workspace, source_data_dir, target_data_dir))
+   if (migrate_pgbackrest_backup(bck, password, workspace, source_data_dir, target_data_dir, target_wal_dir))
    {
       pgmoneta_log_error("Failed to migrate backup %s", bck->backup_id);
       goto error;
    }
    pgmoneta_log_info("Successfully migrated backup %s", bck->backup_id);
+
+   //TODO: compress and encrypt wal segments
 
    free(password);
    free(target_data_dir);
@@ -528,6 +534,59 @@ pgbackrest_backup_info_destroy(struct pgbackrest_backup_info* backup)
    free(backup);
 }
 
+static int
+pgbackrest_backup_info_validate(struct pgbackrest_backup_info* bck)
+{
+   if (bck == NULL)
+   {
+      pgmoneta_log_error("Expecting non NULL backup info");
+      goto error;
+   }
+   if (bck->archive_start == NULL || strlen(bck->archive_start) == 0)
+   {
+      pgmoneta_log_error("Expecting non empty backup archive start");
+      goto error;
+   }
+   else if (strlen(bck->archive_start) != WAL_SEGNAME_SIZE)
+   {
+      pgmoneta_log_error("Invalid backup archive start");
+      goto error;
+   }
+   if (bck->archive_stop == NULL || strlen(bck->archive_stop) == 0)
+   {
+      pgmoneta_log_error("Expecting non empty backup archive stop");
+      goto error;
+   }
+   else if (strlen(bck->archive_stop) != WAL_SEGNAME_SIZE)
+   {
+      pgmoneta_log_error("Invalid backup archive stop");
+      goto error;
+   }
+   if (bck->lsn_start == NULL || strlen(bck->lsn_start) == 0)
+   {
+      pgmoneta_log_error("Expecting non empty backup lsn start");
+      goto error;
+   }
+   if (bck->lsn_stop == NULL || strlen(bck->lsn_stop) == 0)
+   {
+      pgmoneta_log_error("Expecting non empty backup lsn stop");
+      goto error;
+   }
+   if (bck->backup_id == NULL || strlen(bck->backup_id) == 0)
+   {
+      pgmoneta_log_error("Expecting non empty backup ID");
+      goto error;
+   }
+   if (bck->backup_parent == NULL && bck->backup_chain_size == 0)
+   {
+      pgmoneta_log_error("Expecting non empty backup chain when the backup has parent");
+      goto error;
+   }
+   return 0;
+error:
+   return 1;
+}
+
 static void
 pgbackrest_backup_info_destroy_cb(uintptr_t data)
 {
@@ -548,7 +607,7 @@ get_target_backup_id(time_t start_time, char** target_id)
 }
 
 static int
-migrate_pgbackrest_backup(struct art* backups, struct pgbackrest_backup_info* backup_info, char* password, char* root_workspace, char* source_dir, char* target_dir)
+migrate_pgbackrest_backup(struct pgbackrest_backup_info* backup_info, char* password, char* root_workspace, char* source_dir, char* target_data_dir, char* target_wal_dir)
 {
    char* target_backup_id = NULL;
    char source_backup_path[MAX_PATH];
@@ -560,6 +619,11 @@ migrate_pgbackrest_backup(struct art* backups, struct pgbackrest_backup_info* ba
    struct pgbackrest_manifest* manifest = NULL;
    struct art_iterator* iter = NULL;
 
+   if (pgbackrest_backup_info_validate(backup_info))
+   {
+      goto error;
+   }
+
    memset(target_backup_path, 0, sizeof(target_backup_path));
    memset(source_backup_path, 0, sizeof(source_backup_path));
    memset(target_backup_data_path, 0, sizeof(target_backup_data_path));
@@ -569,10 +633,10 @@ migrate_pgbackrest_backup(struct art* backups, struct pgbackrest_backup_info* ba
 
    get_target_backup_id(backup_info->start_time, &target_backup_id);
    snprintf(source_backup_path, sizeof(source_backup_path), "%s%s/", source_dir, backup_info->backup_id);
-   snprintf(target_backup_path, sizeof(target_backup_path), "%s%s/", target_dir, target_backup_id);
+   snprintf(target_backup_path, sizeof(target_backup_path), "%s%s/", target_data_dir, target_backup_id);
    snprintf(workspace, sizeof(workspace), "%s%s/", root_workspace, backup_info->backup_id);
    snprintf(source_backup_data_path, sizeof(source_backup_data_path), "%s%s/pg_data/", source_dir, backup_info->backup_id);
-   snprintf(target_backup_data_path, sizeof(target_backup_data_path), "%s%s/data/", target_dir, target_backup_id);
+   snprintf(target_backup_data_path, sizeof(target_backup_data_path), "%s%s/data/", target_data_dir, target_backup_id);
    snprintf(data_workspace, sizeof(data_workspace), "%s%s/data/", root_workspace, backup_info->backup_id);
 
    pgmoneta_log_info("Start to migrate backup %s from %s to %s", backup_info->backup_id, source_backup_path, target_backup_path);
@@ -607,15 +671,20 @@ migrate_pgbackrest_backup(struct art* backups, struct pgbackrest_backup_info* ba
       {
          continue;
       }
-      if (migrate_pgbackrest_file(backups, backup_info, manifest, iter->key, source_backup_data_path, target_backup_data_path, data_workspace))
+      if (migrate_pgbackrest_file(backup_info, manifest, iter->key, source_backup_data_path, target_backup_data_path, data_workspace))
       {
          goto error;
       }
    }
-   //TODO: build backup_manifest
+   //copy WAL segments
+   if (pgbackrest_handle_pg_wal(target_wal_dir, target_backup_data_path, backup_info->archive_start, backup_info->archive_stop))
+   {
+      pgmoneta_log_error("Failed to copy WAL segments from %s", target_wal_dir);
+      goto error;
+   }
+   //TODO: build backup_manifest and backup.manifest
    //TODO: build backup.info
-   //TODO: wf_migration: compress, encrypt,
-   //TODO: copy WAL segments
+   //TODO: wf_migration: compress, encrypt, link
    pgmoneta_art_iterator_destroy(iter);
    pgbackrest_manifest_destroy(manifest);
    free(target_backup_id);
@@ -651,6 +720,24 @@ pgbackrest_manifest_destroy(struct pgbackrest_manifest* manifest)
 }
 
 static int
+pgbackrest_manifest_validate(struct pgbackrest_manifest* manifest)
+{
+   if (manifest == NULL)
+   {
+      pgmoneta_log_error("Expecting non-NULL manifest");
+      goto error;
+   }
+   if (manifest->files == NULL || manifest->files->size == 0)
+   {
+      pgmoneta_log_error("Expecting manifest files");
+      goto error;
+   }
+   return 0;
+error:
+   return 1;
+}
+
+static int
 load_pgbackrest_manifest(char* password, char* source_backup_path, char* workspace, struct pgbackrest_manifest** manifest)
 {
    char manifest_path[MAX_PATH];
@@ -677,6 +764,10 @@ load_pgbackrest_manifest(char* password, char* source_backup_path, char* workspa
    }
    pgmoneta_log_info("parsing manifest %s", dest);
    if (parse_pgbackrest_manifest(dest, &m))
+   {
+      goto error;
+   }
+   if (pgbackrest_manifest_validate(m))
    {
       goto error;
    }
@@ -810,7 +901,7 @@ error:
 }
 
 static int
-migrate_pgbackrest_file(struct art* backups, struct pgbackrest_backup_info* backup_info, struct pgbackrest_manifest* manifest, char* relative_path, char* source_root_dir, char* target_root_dir, char* workspace_root_dir)
+migrate_pgbackrest_file(struct pgbackrest_backup_info* backup_info, struct pgbackrest_manifest* manifest, char* relative_path, char* source_root_dir, char* target_root_dir, char* workspace_root_dir)
 {
    char* source_file_path = NULL;
    char* target_file_path = NULL;
@@ -890,6 +981,8 @@ migrate_pgbackrest_file(struct art* backups, struct pgbackrest_backup_info* back
          goto error;
       }
    }
+
+   // special handling on pg_wal/
 
    free(source_file_path);
    free(target_file_path);
@@ -1193,5 +1286,90 @@ extract_wal_file_info(char* file_name, char** seg_name, int* compression)
    return 0;
 error:
    free(seg);
+   return 1;
+}
+
+static int
+pgbackrest_handle_pg_wal(char* wal_dir, char* target_backup_data_path, char* wal_start, char* wal_stop)
+{
+   char achv_stat_path[MAX_PATH];
+   char summaries_path[MAX_PATH];
+   char wal_file_from[MAX_PATH];
+   char wal_stat_file_to[MAX_PATH];
+   char wal_file_to[MAX_PATH];
+   DIR* dir;
+   struct dirent* entry;
+
+   pgmoneta_log_info("Copying WAL segments ranging from %s to %s", wal_start, wal_stop);
+
+   memset(achv_stat_path, 0, sizeof(achv_stat_path));
+   memset(summaries_path, 0, sizeof(summaries_path));
+
+   if (wal_dir == NULL || target_backup_data_path == NULL || wal_start == NULL || wal_stop == NULL)
+   {
+      goto error;
+   }
+
+   snprintf(achv_stat_path, sizeof(achv_stat_path), "%s" PG_WAL_DIR "archive_status/", target_backup_data_path);
+   snprintf(summaries_path, sizeof(summaries_path), "%s" PG_WAL_DIR "summaries/", target_backup_data_path);
+
+   // postgres doesn't actually backup summaries file, so an empty folder is enough
+   if (pgmoneta_mkdir(summaries_path))
+   {
+      pgmoneta_log_error("Failed to create the pg_wal/summaries/ directory");
+      goto error;
+   }
+
+   if (pgmoneta_mkdir(achv_stat_path))
+   {
+      pgmoneta_log_error("Failed to create the pg_wal/archive_status/ directory");
+      goto error;
+   }
+
+   dir = opendir(wal_dir);
+   if (dir == NULL)
+   {
+      pgmoneta_log_error("Failed to open the WAL directory at %s", wal_dir);
+      goto error;
+   }
+   while ((entry = readdir(dir)) != NULL)
+   {
+      if (entry->d_type != DT_REG)
+      {
+         continue;
+      }
+      if (strlen(entry->d_name) != WAL_SEGNAME_SIZE ||
+          strcmp(entry->d_name, wal_start) < 0 ||
+          strcmp(entry->d_name, wal_stop) > 0)
+      {
+         continue;
+      }
+      memset(wal_file_from, 0, sizeof(wal_file_from));
+      memset(wal_file_to, 0, sizeof(wal_file_to));
+      memset(wal_stat_file_to, 0, sizeof(wal_stat_file_to));
+      snprintf(wal_file_from, sizeof(wal_file_from), "%s" PG_WAL_DIR "%s", wal_dir, entry->d_name);
+      snprintf(wal_file_to, sizeof(wal_file_to), "%s" PG_WAL_DIR "%s", target_backup_data_path, entry->d_name);
+      // since we are copying the segment, we can safely assume the segnment archive is done
+      // if not, the stat file won't be used anyway because pgmoneta relies on streaming replication instead of archive command :)
+      snprintf(wal_stat_file_to, 0, sizeof(wal_stat_file_to), "%s" PG_WAL_DIR "%s.done", target_backup_data_path, entry->d_name);
+      if (create_file_placeholder(wal_stat_file_to))
+      {
+         pgmoneta_log_error("Failed to create WAL archive status file %s", wal_stat_file_to);
+         goto error;
+      }
+      if (pgmoneta_copy_file(wal_file_from, wal_file_to, NULL))
+      {
+         pgmoneta_log_error("Failed to copy WAL segment from %s to %s", wal_file_from, wal_file_to);
+         goto error;
+      }
+      pgmoneta_log_info("Copied wal segment %s to %s" PG_WAL_DIR, entry->d_name, target_backup_data_path);
+   }
+   closedir(dir);
+   return 0;
+error:
+   if (dir != NULL)
+   {
+      closedir(dir);
+   }
    return 1;
 }

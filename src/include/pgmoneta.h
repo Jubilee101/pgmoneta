@@ -609,16 +609,16 @@ struct walfilter_configuration
 struct muse_configuration
 {
    struct common_configuration common;
-   char base_dir[MAX_PATH];                  /**< The target base directory */
-   char source_password[MAX_PASSWORD_CHARS]; /**< The source cipher password for encryption */
-   int source_tool;                          /**< The source tool */
-   int encryption;                           /**< The encryption method of migrated backup */
-   int compression;                          /**< The compression method of migrated backup */
-   int compression_level;                    /**< The compression level of migrated backup */
-   int output_format;                        /**< Default output format for the outcome */
-   char workspace[MAX_PATH];                 /**< A workspace for migration */
-   char source_data_dir[MAX_PATH];           /**< The direct source data directory */
-   char source_wal_dir[MAX_PATH];            /**< The direct source WAL directory */
+   char base_dir[MAX_PATH];                   /**< The target base directory */
+   char source_password[MAX_PASSWORD_LENGTH]; /**< The source cipher password for encryption */
+   int source_tool;                           /**< The source tool */
+   int encryption;                            /**< The encryption method of migrated backup */
+   int compression;                           /**< The compression method of migrated backup */
+   int compression_level;                     /**< The compression level of migrated backup */
+   int output_format;                         /**< Default output format for the outcome */
+   char workspace[MAX_PATH];                  /**< A workspace for migration */
+   char source_data_dir[MAX_PATH];            /**< The direct source data directory */
+   char source_wal_dir[MAX_PATH];             /**< The direct source WAL directory */
 } __attribute__((aligned(64)));
 
 #ifdef __cplusplus
