@@ -158,6 +158,9 @@ migrate_pgbackrest(char* source_data_dir, char* source_wal_dir, char* target_bas
    char* password = NULL;
    struct art* backups = NULL;
    struct pgbackrest_backup_info* bck = NULL;
+   struct muse_configuration* conf = NULL;
+
+   conf = (struct muse_configuration*)shmem;
 
    pgmoneta_log_info("Start migration from pgBackRest, workspace %s", workspace);
    build_target_dir(target_base_dir, server, &target_data_dir, &target_wal_dir);
@@ -227,7 +230,18 @@ migrate_pgbackrest(char* source_data_dir, char* source_wal_dir, char* target_bas
    }
    pgmoneta_log_info("Successfully migrated backup %s", bck->backup_id);
 
-   //TODO: compress and encrypt wal segments
+   //compress and encrypt wal segments
+   if (pgmoneta_compress_directory(-1, target_wal_dir, conf->compression, NULL, NULL))
+   {
+      pgmoneta_log_error("Failed to compress WAL archive directory %s", target_wal_dir);
+      goto error;
+   }
+
+   if (pgmoneta_encrypt_directory(-1, target_wal_dir, NULL, NULL))
+   {
+      pgmoneta_log_error("Failed to encrypt WAL archive directory %s", target_wal_dir);
+      goto error;
+   }
 
    free(password);
    free(target_data_dir);
