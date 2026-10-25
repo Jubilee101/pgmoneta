@@ -348,8 +348,7 @@ parse_pgbackrest_backup_info(char* path, char** password, struct art** backups)
 
    pgmoneta_art_create(&dict);
 
-   file = fopen(path, "r");
-   if (file == NULL)
+   if (pgmoneta_fopen_secure(path, "r", &file))
    {
       pgmoneta_log_error("Could not open file %s: %s", path, strerror(errno));
       errno = 0;
@@ -811,8 +810,7 @@ parse_pgbackrest_manifest(char* path, struct pgbackrest_manifest** manifest)
 
    *manifest = NULL;
    pgbackrest_manifest_create(&m);
-   file = fopen(path, "r");
-   if (file == NULL)
+   if (pgmoneta_fopen_secure(path, "r", &file))
    {
       pgmoneta_log_error("Could not open file %s: %s", path, strerror(errno));
       errno = 0;
@@ -1058,8 +1056,7 @@ static int
 create_file_placeholder(char* target_path)
 {
    FILE* file = NULL;
-   file = fopen(target_path, "w");
-   if (file == NULL)
+   if (pgmoneta_fopen_secure(target_path, "w", &file))
    {
       pgmoneta_log_error("Unable to create placeholder file %s: %s", target_path, strerror(errno));
       errno = 0;
