@@ -53,7 +53,6 @@
 #define PGBACKREST_FILE_REFERENCE   "reference"
 #define PGBACKREST_PASSWORD_KEY     "cipher-pass"
 #define PGBACKREST_WAL_CHECKSUM_LEN 40
-#define WAL_SEGNAME_SIZE            24
 #define PG_WAL_DIR                  "pg_wal/"
 
 struct pgbackrest_backup_info
@@ -568,7 +567,7 @@ pgbackrest_backup_info_validate(struct pgbackrest_backup_info* bck)
       pgmoneta_log_error("Expecting non empty backup archive start");
       goto error;
    }
-   else if (strlen(bck->archive_start) != WAL_SEGNAME_SIZE)
+   else if (!pgmoneta_is_wal_file(bck->archive_start))
    {
       pgmoneta_log_error("Invalid backup archive start");
       goto error;
@@ -578,7 +577,7 @@ pgbackrest_backup_info_validate(struct pgbackrest_backup_info* bck)
       pgmoneta_log_error("Expecting non empty backup archive stop");
       goto error;
    }
-   else if (strlen(bck->archive_stop) != WAL_SEGNAME_SIZE)
+   else if (!pgmoneta_is_wal_file(bck->archive_stop))
    {
       pgmoneta_log_error("Invalid backup archive stop");
       goto error;
@@ -1150,7 +1149,7 @@ extract_wal_segments(char* source_dir, char* target_dir)
    {
       if (pgmoneta_compare_string(entry->d_name, ".") ||
           pgmoneta_compare_string(entry->d_name, "..") ||
-          pgmoneta_ends_with(entry->d_name, ".backup"))
+          !pgmoneta_is_wal_file(entry->d_name))
       {
          continue;
       }
@@ -1347,7 +1346,7 @@ pgbackrest_handle_pg_wal(char* wal_dir, char* target_backup_data_path, char* wal
       {
          continue;
       }
-      if (strlen(entry->d_name) != WAL_SEGNAME_SIZE ||
+      if (!pgmoneta_is_wal_file(entry->d_name) ||
           strcmp(entry->d_name, wal_start) < 0 ||
           strcmp(entry->d_name, wal_stop) > 0)
       {
