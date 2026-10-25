@@ -103,6 +103,8 @@ static int extract_wal_segments(char* source_dir, char* target_dir);
 static bool is_wal_dir(char* dir);
 static int extract_wal_file_info(char* file_name, char** seg_name, int* compression);
 static int pgbackrest_handle_pg_wal(char* wal_dir, char* target_backup_data_path, char* wal_start, char* wal_stop);
+static int build_backup_manifest(char* target_backup_data_path, struct pgbackrest_manifest* manifest, struct pgbackrest_backup_info* backup_info);
+static int build_backup_info(char* target_backup_data_path, char* target_backup_path);
 
 int
 pgmoneta_migrate(char* backup_id, char* server, char* workspace)
@@ -231,16 +233,22 @@ migrate_pgbackrest(char* source_data_dir, char* source_wal_dir, char* target_bas
    pgmoneta_log_info("Successfully migrated backup %s", bck->backup_id);
 
    //compress and encrypt wal segments
-   if (pgmoneta_compress_directory(-1, target_wal_dir, conf->compression, NULL, NULL))
+   if (conf->compression != COMPRESSION_NONE)
    {
-      pgmoneta_log_error("Failed to compress WAL archive directory %s", target_wal_dir);
-      goto error;
+      if (pgmoneta_compress_directory(-1, target_wal_dir, conf->compression, NULL, NULL))
+      {
+         pgmoneta_log_error("Failed to compress WAL archive directory %s", target_wal_dir);
+         goto error;
+      }
    }
 
-   if (pgmoneta_encrypt_directory(-1, target_wal_dir, NULL, NULL))
+   if (conf->encryption != ENCRYPTION_NONE)
    {
-      pgmoneta_log_error("Failed to encrypt WAL archive directory %s", target_wal_dir);
-      goto error;
+      if (pgmoneta_encrypt_directory(-1, target_wal_dir, NULL, NULL))
+      {
+         pgmoneta_log_error("Failed to encrypt WAL archive directory %s", target_wal_dir);
+         goto error;
+      }
    }
 
    free(password);
@@ -923,12 +931,9 @@ migrate_pgbackrest_file(struct pgbackrest_backup_info* backup_info, struct pgbac
    struct json* file_info = NULL;
    char* target_backup_id = NULL;
 
-   source_file_path = pgmoneta_append(source_file_path, source_root_dir);
-   source_file_path = pgmoneta_append(source_file_path, relative_path);
-   target_file_path = pgmoneta_append(target_file_path, target_root_dir);
-   target_file_path = pgmoneta_append(target_file_path, relative_path);
-   workspace_file_path = pgmoneta_append(workspace_file_path, workspace_root_dir);
-   workspace_file_path = pgmoneta_append(workspace_file_path, relative_path);
+   source_file_path = pgmoneta_format_and_append(source_file_path, "%s%s", source_root_dir, relative_path);
+   target_file_path = pgmoneta_format_and_append(target_file_path, "%s%s", target_root_dir, relative_path);
+   workspace_file_path = pgmoneta_format_and_append(workspace_file_path, "%s%s", workspace_root_dir, relative_path);
    get_target_backup_id(backup_info->start_time, &target_backup_id);
 
    switch (manifest->compression)
@@ -1016,10 +1021,8 @@ create_file_directory(char* target_root_dir, char* workspace_root_dir, char* rel
 {
    char* path = NULL;
    char* workspace_path = NULL;
-   path = pgmoneta_append(path, target_root_dir);
-   path = pgmoneta_append(path, relative_path);
-   workspace_path = pgmoneta_append(workspace_path, workspace_root_dir);
-   workspace_path = pgmoneta_append(workspace_path, relative_path);
+   path = pgmoneta_format_and_append(path, "%s%s", target_root_dir, relative_path);
+   workspace_path = pgmoneta_format_and_append(path, "%s%s", workspace_root_dir, relative_path);
 
    char* dir = dirname(path);
    char* wspc_dir = dirname(workspace_path);
@@ -1092,8 +1095,7 @@ migrate_wal_segments(char* source_dir, char* target_dir)
       {
          continue;
       }
-      from = pgmoneta_append(from, source_dir);
-      from = pgmoneta_append(from, entry->d_name);
+      from = pgmoneta_format_and_append(from, "%s%s", source_dir, entry->d_name);
 
       if (!stat(from, &statbuf))
       {
@@ -1156,11 +1158,8 @@ extract_wal_segments(char* source_dir, char* target_dir)
          continue;
       }
 
-      path = pgmoneta_append(path, source_dir);
-      path = pgmoneta_append(path, entry->d_name);
-
-      target_path = pgmoneta_append(target_path, target_dir);
-      target_path = pgmoneta_append(target_path, entry->d_name);
+      path = pgmoneta_format_and_append(path, "%s%s", source_dir, entry->d_name);
+      target_path = pgmoneta_format_and_append(target_path, "%s%s", target_dir, entry->d_name);
 
       if (!stat(path, &statbuf))
       {
@@ -1174,8 +1173,7 @@ extract_wal_segments(char* source_dir, char* target_dir)
          }
       }
 
-      final_path = pgmoneta_append(final_path, target_dir);
-      final_path = pgmoneta_append(final_path, seg_name);
+      final_path = pgmoneta_format_and_append(final_path, "%s%s", target_dir, seg_name);
 
       if (pgmoneta_cbc_decrypt_salted_file(CBC_DIGEST_DEFAULT,
                                            false,
@@ -1386,4 +1384,14 @@ error:
       closedir(dir);
    }
    return 1;
+}
+
+static int
+build_backup_manifest(char* target_backup_data_path, struct pgbackrest_manifest* manifest, struct pgbackrest_backup_info* backup_info)
+{
+}
+
+static int
+build_backup_info(char* target_backup_data_path, char* target_backup_path)
+{
 }
