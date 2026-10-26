@@ -6349,3 +6349,39 @@ pgmoneta_get_lsn(uint32_t hi, uint32_t lo)
 {
    return ((uint64_t)hi << 32) | lo;
 }
+
+int
+pgmoneta_string_to_uint64(char* str, uint64_t* number)
+{
+   unsigned long long n = 0;
+   char* endptr;
+   errno = 0;
+   if (str == NULL || strlen(str) == 0)
+   {
+      goto error;
+   }
+
+   n = strtoull(str, &endptr, 10);
+   if (errno == ERANGE)
+   {
+      pgmoneta_log_error("String %s out of range of unsigned long long type", str);
+      errno = 0;
+      goto error;
+   }
+   else if (endptr == str)
+   {
+      pgmoneta_log_error("No digits detected in the string %s", str);
+      goto error;
+   }
+   else if (*endptr != '\0')
+   {
+      pgmoneta_log_error("Trailing non-numeric characters left in string %s", str);
+      goto error;
+   }
+
+   *number = (uint64_t)n;
+   return 0;
+error:
+
+   return 1;
+}

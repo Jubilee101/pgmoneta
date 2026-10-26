@@ -1627,6 +1627,15 @@ pgmoneta_time_is_valid(pgmoneta_time_t t);
 int
 pgmoneta_time_format(pgmoneta_time_t t, enum pgmoneta_time_format_t fmt, char** output);
 
+/**
+ * Convert a string into a uint64
+ * @param str The string
+ * @param number The number
+ * @return 0 on success, otherwise 1
+ */
+int
+pgmoneta_string_to_uint64(char* str, uint64_t* number);
+
 #ifdef __cplusplus
 }
 #endif

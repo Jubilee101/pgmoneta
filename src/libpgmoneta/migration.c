@@ -74,6 +74,7 @@ struct pgbackrest_manifest
 {
    int compression;
    char* backup_password;
+   uint64_t db_system_id;
    struct art* files;
 };
 
@@ -752,6 +753,11 @@ pgbackrest_manifest_validate(struct pgbackrest_manifest* manifest)
       pgmoneta_log_error("Expecting manifest files");
       goto error;
    }
+   if (manifest->db_system_id == 0)
+   {
+      pgmoneta_log_error("Expecting database system ID in the manifest");
+      goto error;
+   }
    return 0;
 error:
    return 1;
@@ -897,6 +903,14 @@ parse_pgbackrest_manifest(char* path, struct pgbackrest_manifest** manifest)
          else
          {
             pgmoneta_log_error("Unrecognized compression method %s", value);
+            goto error;
+         }
+      }
+      else if (pgmoneta_compare_string("db-system-id", &key[0]))
+      {
+         if (pgmoneta_string_to_uint64(value, &m->db_system_id))
+         {
+            pgmoneta_log_error("Failed to get system ID from %s", value);
             goto error;
          }
       }
@@ -1385,6 +1399,15 @@ error:
 static int
 build_backup_manifest(char* target_backup_data_path, struct pgbackrest_manifest* manifest, struct pgbackrest_backup_info* backup_info)
 {
+   char* manifest_path = NULL;
+   struct json* manifest = NULL;
+   manifest_path = pgmoneta_format_and_append(manifest_path, "%sbackup_manifest", target_backup_data_path);
+
+   free(manifest_path);
+   return 0;
+error:
+   free(manifest_path);
+   return 1;
 }
 
 static int
