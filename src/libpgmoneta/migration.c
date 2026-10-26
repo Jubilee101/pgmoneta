@@ -41,6 +41,7 @@
 #include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
+#include <inttypes.h>
 #include <libgen.h>
 #include <stdio.h>
 #include <time.h>
@@ -108,6 +109,7 @@ static int extract_wal_file_info(char* file_name, char** seg_name, int* compress
 static int pgbackrest_handle_pg_wal(char* wal_dir, char* target_backup_data_path, char* wal_start, char* wal_stop);
 static int build_backup_manifest(char* target_backup_data_path, struct pgbackrest_manifest* manifest, struct pgbackrest_backup_info* backup_info);
 static int build_backup_info(char* target_backup_data_path, char* target_backup_path);
+static int get_current_timeline(char* wal_name, uint32_t* tli);
 
 int
 pgmoneta_migrate(char* backup_id, char* server, char* workspace)
@@ -729,6 +731,7 @@ migrate_pgbackrest_backup(struct pgbackrest_backup_info* backup_info, char* pass
    char target_backup_data_path[MAX_PATH];
    char workspace[MAX_PATH];
    char data_workspace[MAX_PATH];
+   uint32_t tli = 0;
    struct pgbackrest_manifest* manifest = NULL;
    struct art_iterator* iter = NULL;
 
@@ -753,6 +756,14 @@ migrate_pgbackrest_backup(struct pgbackrest_backup_info* backup_info, char* pass
    snprintf(data_workspace, sizeof(data_workspace), "%s%s/data/", root_workspace, backup_info->backup_id);
 
    pgmoneta_log_info("Start to migrate backup %s from %s to %s", backup_info->backup_id, source_backup_path, target_backup_path);
+
+   if (get_current_timeline(backup_info->archive_stop, &tli))
+   {
+      pgmoneta_log_error("Failed to extract current timeline from %s", backup_info->archive_stop);
+      goto error;
+   }
+
+   pgmoneta_log_info("Current backup timeline: %" PRIx32, tli);
 
    if (pgmoneta_mkdir(workspace))
    {
@@ -1550,4 +1561,24 @@ error:
 static int
 build_backup_info(char* target_backup_data_path, char* target_backup_path)
 {
+}
+
+static int
+get_current_timeline(char* wal_name, uint32_t* tli)
+{
+   uint32_t t = 0;
+   char wal[9];
+   if (!pgmoneta_is_wal_file(wal_name))
+   {
+      pgmoneta_log_error("%s is not a valid wal segment name", wal_name);
+      goto error;
+   }
+   memset(wal, 0, sizeof(wal));
+   memcpy(wal, wal_name, 8);
+   t = (uint32_t)strtoul(wal, NULL, 16);
+
+   *tli = t;
+   return 0;
+error:
+   return 1;
 }
