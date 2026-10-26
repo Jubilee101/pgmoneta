@@ -4141,6 +4141,10 @@ error:
 bool
 pgmoneta_is_wal_file(char* file)
 {
+   if (file == NULL)
+   {
+      return false;
+   }
    if (strlen(file) != 24)
    {
       return false;

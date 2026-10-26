@@ -54,6 +54,7 @@
 #define PGBACKREST_PASSWORD_KEY     "cipher-pass"
 #define PGBACKREST_WAL_CHECKSUM_LEN 40
 #define PG_WAL_DIR                  "pg_wal/"
+#define HISTORY_SUFFIX              ".history"
 
 struct pgbackrest_backup_info
 {
@@ -79,6 +80,7 @@ struct pgbackrest_manifest
 };
 
 static int load_backup_info(char* source_dir, char* workspace, char** password, struct art** backup_info);
+static int load_archive_password(char* source_wal_dir, char* workspace_dir, char** password);
 static void build_target_dir(char* source_dir, char* server, char** target_data_dir, char** target_wal_dir);
 static int migrate_pgbackrest(char* source_data_dir, char* source_wal_dir, char* target_base_dir, char* backup_id, char* server, char* workspace);
 
@@ -98,8 +100,9 @@ static int parse_pgbackrest_manifest(char* path, struct pgbackrest_manifest** ma
 static int migrate_pgbackrest_file(struct pgbackrest_backup_info* backup_info, struct pgbackrest_manifest* manifest, char* relative_path, char* source_root_dir, char* target_root_dir, char* workspace_root_dir);
 static int create_file_directory(char* target_root_dir, char* workspace_root_dir, char* relative_path);
 static int create_file_placeholder(char* target_path);
-static int migrate_wal_segments(char* source_dir, char* target_dir);
-static int extract_wal_segments(char* source_dir, char* target_dir);
+static int migrate_wal_segments(char* workspace, char* source_dir, char* target_dir);
+static int extract_wal_segments(char* password, char* source_dir, char* target_dir);
+static int extract_wal_history(char* password, char* source_history, char* history_name, char* target_dir);
 static bool is_wal_dir(char* dir);
 static int extract_wal_file_info(char* file_name, char** seg_name, int* compression);
 static int pgbackrest_handle_pg_wal(char* wal_dir, char* target_backup_data_path, char* wal_start, char* wal_stop);
@@ -200,7 +203,7 @@ migrate_pgbackrest(char* source_data_dir, char* source_wal_dir, char* target_bas
 
    //Move WAL segments
    pgmoneta_log_info("Migrating WAL segments from %s to %s", source_wal_dir, target_wal_dir);
-   if (migrate_wal_segments(source_wal_dir, target_wal_dir))
+   if (migrate_wal_segments(workspace, source_wal_dir, target_wal_dir))
    {
       pgmoneta_log_error("Failed to migrate WAL segments from %s to %s", source_wal_dir, target_wal_dir);
       goto error;
@@ -309,6 +312,95 @@ load_backup_info(char* source_dir, char* workspace, char** password, struct art*
 error:
    free(dest);
    free(backup_info_path);
+   return 1;
+}
+
+static int
+load_archive_password(char* source_wal_dir, char* workspace_dir, char** password)
+{
+   char* archive_info_path = NULL;
+   char* workspace_path = NULL;
+   char* pass = NULL;
+   FILE* file = NULL;
+   char buffer[INFO_BUFFER_SIZE];
+   struct muse_configuration* conf = NULL;
+
+   conf = (struct muse_configuration*)shmem;
+   // I'm too tired to add another configuration so I'm going to assume archive.info
+   // exists one level above the actual archive based on pgbackrest directory structure
+   archive_info_path = pgmoneta_format_and_append(archive_info_path, "%s../archive.info", source_wal_dir);
+   workspace_path = pgmoneta_format_and_append(workspace_path, "%sarchive.info", workspace_dir);
+   // TODO: handle the case where backup is not encrypted
+   if (pgmoneta_cbc_decrypt_salted_file(CBC_DIGEST_DEFAULT,
+                                        false,
+                                        (unsigned char*)conf->source_password,
+                                        strlen(conf->source_password),
+                                        archive_info_path,
+                                        workspace_path))
+   {
+      pgmoneta_log_error("Failed to decrypt archive info at %s", archive_info_path);
+      goto error;
+   }
+
+   if (pgmoneta_fopen_secure(workspace_path, "r", &file))
+   {
+      pgmoneta_log_error("Failed to open decrypted archive info at %s", workspace_path);
+      goto error;
+   }
+
+   while ((fgets(&buffer[0], sizeof(buffer), file)) != NULL)
+   {
+      char key[INFO_BUFFER_SIZE];
+      char value[INFO_BUFFER_SIZE];
+      char* ptr = NULL;
+
+      if (buffer[0] == '\n')
+      {
+         continue;
+      }
+      memset(&key[0], 0, sizeof(key));
+      memset(&value[0], 0, sizeof(value));
+
+      ptr = strtok(&buffer[0], "=");
+
+      if (ptr == NULL)
+      {
+         goto error;
+      }
+
+      memcpy(&key[0], ptr, strlen(ptr));
+
+      ptr = strtok(NULL, "=");
+
+      if (ptr == NULL)
+      {
+         goto error;
+      }
+
+      memcpy(&value[0], ptr, strlen(ptr) - 1);
+
+      if (pgmoneta_compare_string(PGBACKREST_PASSWORD_KEY, &key[0]))
+      {
+         // remove the double quotes
+         value[strlen(value) - 1] = 0;
+         pass = pgmoneta_append(pass, &value[1]);
+      }
+   }
+
+   *password = pass;
+
+   free(archive_info_path);
+   free(workspace_path);
+   fclose(file);
+   return 0;
+error:
+   free(archive_info_path);
+   free(workspace_path);
+   free(pass);
+   if (file != NULL)
+   {
+      fclose(file);
+   }
    return 1;
 }
 
@@ -1086,12 +1178,19 @@ error:
 }
 
 static int
-migrate_wal_segments(char* source_dir, char* target_dir)
+migrate_wal_segments(char* workspace, char* source_dir, char* target_dir)
 {
    struct dirent* entry;
    struct stat statbuf;
    DIR* d = opendir(source_dir);
    char* from = NULL;
+   char* password = NULL;
+
+   if (load_archive_password(source_dir, workspace, &password))
+   {
+      pgmoneta_log_error("Failed to load archive password");
+      goto error;
+   }
 
    if (d == NULL)
    {
@@ -1113,9 +1212,18 @@ migrate_wal_segments(char* source_dir, char* target_dir)
          {
             from = pgmoneta_append(from, "/");
             pgmoneta_log_info("Extracting WAL directory %s", from);
-            if (extract_wal_segments(from, target_dir))
+            if (extract_wal_segments(password, from, target_dir))
             {
                pgmoneta_log_error("Failed to extract WAL segments from %s", from);
+               goto error;
+            }
+         }
+         // handle history file, in pgbackrest archive only segments are compressed
+         else if (S_ISREG(statbuf.st_mode) && pgmoneta_ends_with(entry->d_name, HISTORY_SUFFIX))
+         {
+            if (extract_wal_history(password, from, entry->d_name, target_dir))
+            {
+               pgmoneta_log_error("Failed to extract wal history from %s to %s", from, target_dir);
                goto error;
             }
          }
@@ -1134,6 +1242,7 @@ migrate_wal_segments(char* source_dir, char* target_dir)
       closedir(d);
    }
    free(from);
+   free(password);
    return 0;
 error:
    if (d != NULL)
@@ -1141,11 +1250,12 @@ error:
       closedir(d);
    }
    free(from);
+   free(password);
    return 1;
 }
 
 static int
-extract_wal_segments(char* source_dir, char* target_dir)
+extract_wal_segments(char* password, char* source_dir, char* target_dir)
 {
    struct dirent* entry;
    struct stat statbuf;
@@ -1187,8 +1297,8 @@ extract_wal_segments(char* source_dir, char* target_dir)
 
       if (pgmoneta_cbc_decrypt_salted_file(CBC_DIGEST_DEFAULT,
                                            false,
-                                           (unsigned char*)config->source_password,
-                                           strlen(config->source_password),
+                                           (unsigned char*)password,
+                                           strlen(password),
                                            path,
                                            target_path))
       {
@@ -1230,6 +1340,33 @@ error:
    free(seg_name);
    free(target_path);
    free(final_path);
+   return 1;
+}
+
+static int
+extract_wal_history(char* password, char* source_history, char* history_name, char* target_dir)
+{
+   char* target_history = NULL;
+   struct muse_configuration* config = NULL;
+
+   target_history = pgmoneta_format_and_append(target_history, "%s%s", target_dir, history_name);
+   // TODO: handle the case where backup is not encrypted
+   pgmoneta_log_info("Decrypting archive history from %s to %s", source_history, target_history);
+   if (pgmoneta_cbc_decrypt_salted_file(CBC_DIGEST_DEFAULT,
+                                        false,
+                                        (unsigned char*)password,
+                                        password,
+                                        source_history,
+                                        target_history))
+   {
+      pgmoneta_log_error("Failed to decrypt archive history at %s", source_history);
+      goto error;
+   }
+
+   free(target_history);
+   return 0;
+error:
+   free(target_history);
    return 1;
 }
 
