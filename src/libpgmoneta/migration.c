@@ -106,10 +106,10 @@ static int extract_wal_segments(char* password, char* source_dir, char* target_d
 static int extract_wal_history(char* password, char* source_history, char* history_name, char* target_dir);
 static bool is_wal_dir(char* dir);
 static int extract_wal_file_info(char* file_name, char** seg_name, int* compression);
-static int pgbackrest_handle_pg_wal(char* wal_dir, char* target_backup_data_path, char* wal_start, char* wal_stop);
+static int pgbackrest_handle_pg_wal(uint32_t tli, char* wal_dir, char* target_backup_data_path, char* wal_start, char* wal_stop);
 static int build_backup_manifest(char* target_backup_data_path, struct pgbackrest_manifest* manifest, struct pgbackrest_backup_info* backup_info);
-static int build_backup_info(char* target_backup_data_path, char* target_backup_path);
 static int get_current_timeline(char* wal_name, uint32_t* tli);
+static int build_backup_info(char* target_backup_data_path, char* target_backup_path);
 
 int
 pgmoneta_migrate(char* backup_id, char* server, char* workspace)
@@ -327,6 +327,8 @@ load_archive_password(char* source_wal_dir, char* workspace_dir, char** password
    char buffer[INFO_BUFFER_SIZE];
    struct muse_configuration* conf = NULL;
 
+   *password = NULL;
+
    conf = (struct muse_configuration*)shmem;
    // I'm too tired to add another configuration so I'm going to assume archive.info
    // exists one level above the actual archive based on pgbackrest directory structure
@@ -356,7 +358,7 @@ load_archive_password(char* source_wal_dir, char* workspace_dir, char** password
       char value[INFO_BUFFER_SIZE];
       char* ptr = NULL;
 
-      if (buffer[0] == '\n')
+      if (buffer[0] == '\n' || buffer[0] == '[')
       {
          continue;
       }
@@ -1197,7 +1199,8 @@ migrate_wal_segments(char* workspace, char* source_dir, char* target_dir)
    char* from = NULL;
    char* password = NULL;
 
-   if (load_archive_password(source_dir, workspace, &password))
+   // TODO: handle no encryption case (password may not be present)
+   if (load_archive_password(source_dir, workspace, &password) || password == NULL)
    {
       pgmoneta_log_error("Failed to load archive password");
       goto error;
@@ -1460,13 +1463,15 @@ error:
 }
 
 static int
-pgbackrest_handle_pg_wal(char* wal_dir, char* target_backup_data_path, char* wal_start, char* wal_stop)
+pgbackrest_handle_pg_wal(uint32_t tli, char* wal_dir, char* target_backup_data_path, char* wal_start, char* wal_stop)
 {
    char achv_stat_path[MAX_PATH];
    char summaries_path[MAX_PATH];
    char wal_file_from[MAX_PATH];
    char wal_stat_file_to[MAX_PATH];
    char wal_file_to[MAX_PATH];
+   char wal_history_from[MAX_PATH];
+   char wal_history_to[MAX_PATH];
    DIR* dir;
    struct dirent* entry;
 
@@ -1517,7 +1522,7 @@ pgbackrest_handle_pg_wal(char* wal_dir, char* target_backup_data_path, char* wal
       memset(wal_file_from, 0, sizeof(wal_file_from));
       memset(wal_file_to, 0, sizeof(wal_file_to));
       memset(wal_stat_file_to, 0, sizeof(wal_stat_file_to));
-      snprintf(wal_file_from, sizeof(wal_file_from), "%s" PG_WAL_DIR "%s", wal_dir, entry->d_name);
+      snprintf(wal_file_from, sizeof(wal_file_from), "%s%s", wal_dir, entry->d_name);
       snprintf(wal_file_to, sizeof(wal_file_to), "%s" PG_WAL_DIR "%s", target_backup_data_path, entry->d_name);
       // since we are copying the segment, we can safely assume the segnment archive is done
       // if not, the stat file won't be used anyway because pgmoneta relies on streaming replication instead of archive command :)
@@ -1535,6 +1540,24 @@ pgbackrest_handle_pg_wal(char* wal_dir, char* target_backup_data_path, char* wal
       pgmoneta_log_info("Copied wal segment %s to %s" PG_WAL_DIR, entry->d_name, target_backup_data_path);
    }
    closedir(dir);
+
+   if (tli > 1)
+   {
+      memset(wal_history_to, 0, sizeof(wal_history_to));
+      memset(wal_history_from, 0, sizeof(wal_history_from));
+      snprintf(wal_history_to, sizeof(wal_history_to), "%s" PG_WAL_DIR "%08x.history", target_backup_data_path, tli);
+      snprintf(wal_history_from, sizeof(wal_history_from), "%s%08x.history", wal_dir, tli);
+      pgmoneta_log_info("Try copying history file from %s to %s", wal_history_from, wal_history_to);
+      if (!pgmoneta_exists(wal_history_from))
+      {
+         pgmoneta_log_warn("Unable to find history file %s", wal_history_from);
+      }
+      else if (pgmoneta_copy_file(wal_history_from, wal_history_to, NULL))
+      {
+         pgmoneta_log_error("Failed to copy history file from %s to %s", wal_history_from, wal_history_to);
+         goto error;
+      }
+   }
    return 0;
 error:
    if (dir != NULL)
@@ -1559,11 +1582,6 @@ error:
 }
 
 static int
-build_backup_info(char* target_backup_data_path, char* target_backup_path)
-{
-}
-
-static int
 get_current_timeline(char* wal_name, uint32_t* tli)
 {
    uint32_t t = 0;
@@ -1581,4 +1599,9 @@ get_current_timeline(char* wal_name, uint32_t* tli)
    return 0;
 error:
    return 1;
+}
+
+static int
+build_backup_info(char* target_backup_data_path, char* target_backup_path)
+{
 }
