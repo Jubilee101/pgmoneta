@@ -80,6 +80,13 @@ struct pgbackrest_manifest
    struct art* files;
 };
 
+struct timeline_history
+{
+   uint32_t tli;
+   // max lsn is FFFFFFFF/FFFFFFFF which takes 17 bytes
+   char lsn[18];
+};
+
 static int load_backup_info(char* source_dir, char* workspace, char** password, struct art** backup_info);
 static int load_archive_password(char* source_wal_dir, char* workspace_dir, char** password);
 static void build_target_dir(char* source_dir, char* server, char** target_data_dir, char** target_wal_dir);
@@ -106,9 +113,13 @@ static int extract_wal_segments(char* password, char* source_dir, char* target_d
 static int extract_wal_history(char* password, char* source_history, char* history_name, char* target_dir);
 static bool is_wal_dir(char* dir);
 static int extract_wal_file_info(char* file_name, char** seg_name, int* compression);
-static int pgbackrest_handle_pg_wal(uint32_t tli, char* wal_dir, char* target_backup_data_path, char* wal_start, char* wal_stop);
+static int pgbackrest_handle_pg_wal(uint32_t start_tli, uint32_t stop_tli, char* wal_dir, char* target_backup_data_path, char* wal_start, char* wal_stop, char* lsn_start, char* lsn_stop, struct json** wal_ranges);
 static int build_backup_manifest(char* target_backup_data_path, struct pgbackrest_manifest* manifest, struct pgbackrest_backup_info* backup_info);
 static int get_current_timeline(char* wal_name, uint32_t* tli);
+static int build_wal_ranges(char* lsn_start, char* lsn_stop, uint32_t start_tli, uint32_t stop_tli, char* history_path, struct json** wal_ranges);
+static int read_history(char* history_path, struct deque** switch_points);
+static int timeline_history_create(struct timeline_history** entry);
+static int wal_range_create(uint32_t tli, char* start_lsn, char* stop_lsn, struct json** range);
 static int build_backup_info(char* target_backup_data_path, char* target_backup_path);
 
 int
@@ -733,9 +744,11 @@ migrate_pgbackrest_backup(struct pgbackrest_backup_info* backup_info, char* pass
    char target_backup_data_path[MAX_PATH];
    char workspace[MAX_PATH];
    char data_workspace[MAX_PATH];
-   uint32_t tli = 0;
+   uint32_t start_tli = 0;
+   uint32_t stop_tli = 0;
    struct pgbackrest_manifest* manifest = NULL;
    struct art_iterator* iter = NULL;
+   struct json* wal_ranges = NULL;
 
    if (pgbackrest_backup_info_validate(backup_info))
    {
@@ -758,14 +771,21 @@ migrate_pgbackrest_backup(struct pgbackrest_backup_info* backup_info, char* pass
    snprintf(data_workspace, sizeof(data_workspace), "%s%s/data/", root_workspace, backup_info->backup_id);
 
    pgmoneta_log_info("Start to migrate backup %s from %s to %s", backup_info->backup_id, source_backup_path, target_backup_path);
+   if (get_current_timeline(backup_info->archive_start, &start_tli))
+   {
+      pgmoneta_log_error("Failed to extract current timeline from %s", backup_info->archive_start);
+      goto error;
+   }
 
-   if (get_current_timeline(backup_info->archive_stop, &tli))
+   pgmoneta_log_info("Current backup start timeline: %" PRIx32, start_tli);
+
+   if (get_current_timeline(backup_info->archive_stop, &stop_tli))
    {
       pgmoneta_log_error("Failed to extract current timeline from %s", backup_info->archive_stop);
       goto error;
    }
 
-   pgmoneta_log_info("Current backup timeline: %" PRIx32, tli);
+   pgmoneta_log_info("Current backup stop timeline: %" PRIx32, stop_tli);
 
    if (pgmoneta_mkdir(workspace))
    {
@@ -803,11 +823,15 @@ migrate_pgbackrest_backup(struct pgbackrest_backup_info* backup_info, char* pass
       }
    }
    //copy WAL segments
-   if (pgbackrest_handle_pg_wal(target_wal_dir, target_backup_data_path, backup_info->archive_start, backup_info->archive_stop))
+   if (pgbackrest_handle_pg_wal(start_tli, stop_tli, target_wal_dir,
+                                target_backup_data_path, backup_info->archive_start,
+                                backup_info->archive_stop, backup_info->lsn_start,
+                                backup_info->lsn_stop, &wal_ranges))
    {
       pgmoneta_log_error("Failed to copy WAL segments from %s", target_wal_dir);
       goto error;
    }
+
    //TODO: build backup_manifest and backup.manifest
    //TODO: build backup.info
    //TODO: wf_migration: compress, encrypt, link
@@ -1116,8 +1140,6 @@ migrate_pgbackrest_file(struct pgbackrest_backup_info* backup_info, struct pgbac
          goto error;
       }
    }
-
-   // special handling on pg_wal/
 
    free(source_file_path);
    free(target_file_path);
@@ -1463,7 +1485,7 @@ error:
 }
 
 static int
-pgbackrest_handle_pg_wal(uint32_t tli, char* wal_dir, char* target_backup_data_path, char* wal_start, char* wal_stop)
+pgbackrest_handle_pg_wal(uint32_t start_tli, uint32_t stop_tli, char* wal_dir, char* target_backup_data_path, char* wal_start, char* wal_stop, char* lsn_start, char* lsn_stop, struct json** wal_ranges)
 {
    char achv_stat_path[MAX_PATH];
    char summaries_path[MAX_PATH];
@@ -1473,6 +1495,7 @@ pgbackrest_handle_pg_wal(uint32_t tli, char* wal_dir, char* target_backup_data_p
    char wal_history_from[MAX_PATH];
    char wal_history_to[MAX_PATH];
    DIR* dir;
+   char* history_path = NULL;
    struct dirent* entry;
 
    pgmoneta_log_info("Copying WAL segments ranging from %s to %s", wal_start, wal_stop);
@@ -1541,22 +1564,32 @@ pgbackrest_handle_pg_wal(uint32_t tli, char* wal_dir, char* target_backup_data_p
    }
    closedir(dir);
 
-   if (tli > 1)
+   if (stop_tli > 1)
    {
       memset(wal_history_to, 0, sizeof(wal_history_to));
       memset(wal_history_from, 0, sizeof(wal_history_from));
-      snprintf(wal_history_to, sizeof(wal_history_to), "%s" PG_WAL_DIR "%08x.history", target_backup_data_path, tli);
-      snprintf(wal_history_from, sizeof(wal_history_from), "%s%08x.history", wal_dir, tli);
+      snprintf(wal_history_to, sizeof(wal_history_to), "%s" PG_WAL_DIR "%08x.history", target_backup_data_path, stop_tli);
+      snprintf(wal_history_from, sizeof(wal_history_from), "%s%08x.history", wal_dir, stop_tli);
       pgmoneta_log_info("Try copying history file from %s to %s", wal_history_from, wal_history_to);
       if (!pgmoneta_exists(wal_history_from))
       {
          pgmoneta_log_warn("Unable to find history file %s", wal_history_from);
       }
-      else if (pgmoneta_copy_file(wal_history_from, wal_history_to, NULL))
+      else
       {
-         pgmoneta_log_error("Failed to copy history file from %s to %s", wal_history_from, wal_history_to);
-         goto error;
+         if (pgmoneta_copy_file(wal_history_from, wal_history_to, NULL))
+         {
+            pgmoneta_log_error("Failed to copy history file from %s to %s", wal_history_from, wal_history_to);
+            goto error;
+         }
+         history_path = wal_history_from;
       }
+   }
+
+   if (build_wal_ranges(lsn_start, lsn_stop, start_tli, stop_tli, history_path, wal_ranges))
+   {
+      pgmoneta_log_error("Failed to build the WAL range");
+      goto error;
    }
    return 0;
 error:
@@ -1598,6 +1631,176 @@ get_current_timeline(char* wal_name, uint32_t* tli)
    *tli = t;
    return 0;
 error:
+   return 1;
+}
+
+static int
+build_wal_ranges(char* lsn_start, char* lsn_stop, uint32_t start_tli, uint32_t stop_tli, char* history_path, struct json** wal_ranges)
+{
+   struct json* ranges = NULL;
+   struct json* range = NULL;
+   char* cur_lsn = NULL;
+   struct deque* switch_points = NULL;
+   struct timeline_history* entry = NULL;
+   struct deque_iterator* iter = NULL;
+
+   pgmoneta_json_create(&ranges);
+
+   if (start_tli != stop_tli)
+   {
+      if (history_path == NULL || !pgmoneta_exists(history_path))
+      {
+         pgmoneta_log_error("Failed to find the corresponding history to build WAL ranges at %s", history_path);
+         goto error;
+      }
+      if (read_history(history_path, &switch_points))
+      {
+         pgmoneta_log_error("Failed to read history at %s", history_path);
+         goto error;
+      }
+
+      if (pgmoneta_deque_iterator_create(switch_points, &iter))
+      {
+         pgmoneta_log_error("Failed to create deque iterator for switch points");
+         goto error;
+      }
+
+      cur_lsn = lsn_start;
+      while (pgmoneta_deque_iterator_next(iter))
+      {
+         entry = (struct timeline_history*)pgmoneta_value_data(iter->value);
+         if (entry->tli < start_tli)
+         {
+            continue;
+         }
+         if (wal_range_create(entry->tli, cur_lsn, entry->lsn, &range))
+         {
+            pgmoneta_log_error("Failed to create WAL range");
+            goto error;
+         }
+         pgmoneta_json_append(ranges, (uintptr_t)range, ValueJSON);
+         range = NULL;
+         cur_lsn = entry->lsn;
+      }
+      if (wal_range_create(stop_tli, cur_lsn, lsn_stop, &range))
+      {
+         pgmoneta_log_error("Failed to create WAL range");
+         goto error;
+      }
+      pgmoneta_json_append(ranges, (uintptr_t)range, ValueJSON);
+      range = NULL;
+   }
+   else
+   {
+      if (wal_range_create(start_tli, lsn_start, lsn_stop, &range))
+      {
+         pgmoneta_log_error("Failed to create WAL range");
+         goto error;
+      }
+      pgmoneta_json_append(ranges, (uintptr_t)range, ValueJSON);
+   }
+
+   pgmoneta_deque_iterator_destroy(iter);
+   pgmoneta_deque_destroy(switch_points);
+   *wal_ranges = ranges;
+   return 0;
+error:
+   pgmoneta_deque_iterator_destroy(iter);
+   pgmoneta_deque_destroy(switch_points);
+   pgmoneta_json_destroy(ranges);
+   return 1;
+}
+
+static int
+read_history(char* history_path, struct deque** switch_points)
+{
+   struct deque* sp = NULL;
+   FILE* file = NULL;
+   char line[1024];
+   if (pgmoneta_fopen_secure(history_path, "r", &file))
+   {
+      pgmoneta_log_error("Failed to read history file %s", history_path);
+      goto error;
+   }
+
+   while (fgets(line, sizeof(line), file) != NULL)
+   {
+      char* ptr = line;
+      uint32_t timeline;
+      uint32_t high;
+      uint32_t low;
+      struct timeline_history* entry = NULL;
+      while (isspace((unsigned char)(*ptr)))
+      {
+         ptr++;
+      }
+
+      if (*ptr == '#' || *ptr == '\0')
+      {
+         continue;
+      }
+      if (sscanf(ptr, "%u\t%X/%08X", &timeline, &high, &low) != 3)
+      {
+         pgmoneta_log_error("Failed to parse line %s", ptr);
+         goto error;
+      }
+      if (timeline_history_create(&entry))
+      {
+         pgmoneta_log_error("Failed to create timeline history entry");
+         goto error;
+      }
+      entry->tli = timeline;
+      snprintf(entry->lsn, sizeof(entry->lsn), "%X/%08X", high, low);
+      pgmoneta_deque_add(sp, NULL, (uintptr_t)entry, ValueMem);
+   }
+
+   *switch_points = sp;
+   return 0;
+error:
+   pgmoneta_deque_destroy(sp);
+   return 1;
+}
+
+static int
+timeline_history_create(struct timeline_history** entry)
+{
+   struct timeline_history* e = NULL;
+   e = malloc(sizeof(struct timeline_history));
+   if (e == NULL)
+   {
+      return 1;
+   }
+   memset(e, 0, sizeof(struct timeline_history));
+   *entry = e;
+
+   return 0;
+}
+
+static int
+wal_range_create(uint32_t tli, char* start_lsn, char* stop_lsn, struct json** range)
+{
+   struct json* r = NULL;
+   *range = NULL;
+   if (pgmoneta_json_create(&r))
+   {
+      goto error;
+   }
+   if (pgmoneta_json_put(r, "Timeline", (uintptr_t)tli, ValueUInt32))
+   {
+      goto error;
+   }
+   if (pgmoneta_json_put(r, "Start-LSN", (uintptr_t)start_lsn, ValueString))
+   {
+      goto error;
+   }
+   if (pgmoneta_json_put(r, "End-LSN", (uintptr_t)stop_lsn, ValueString))
+   {
+      goto error;
+   }
+   *range = r;
+   return 0;
+error:
+   pgmoneta_json_destroy(r);
    return 1;
 }
 
