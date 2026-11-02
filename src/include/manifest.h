@@ -42,9 +42,21 @@ extern "C" {
 #define MANIFEST_CHUNK_SIZE 8192
 
 // simple manifest csv structure definition in case we want to change later
-#define MANIFEST_COLUMN_COUNT   2
-#define MANIFEST_PATH_INDEX     0
-#define MANIFEST_CHECKSUM_INDEX 1
+#define MANIFEST_COLUMN_COUNT                2
+#define MANIFEST_PATH_INDEX                  0
+#define MANIFEST_CHECKSUM_INDEX              1
+
+#define MANIFEST_KEY_VERSION                 "PostgreSQL-Backup-Manifest-Version"
+#define MANIFEST_KEY_SYS_IDENTIFIER          "System-Identifier"
+#define MANIFEST_KEY_FILES                   "Files"
+#define MANIFEST_KEY_WAL_RANGES              "WAL-Ranges"
+#define MANIFEST_KEY_CHECKSUM                "Manifest-Checksum"
+
+#define MANIFEST_FILE_KEY_CHECKSUM_ALGORITHM "Checksum-Algorithm"
+#define MANIFEST_FILE_KEY_PATH               "Path"
+#define MANIFEST_FILE_KEY_SIZE               "Size"
+#define MANIFEST_FILE_KEY_LAST_MODIFIED      "Last-Modified"
+#define MANIFEST_FILE_KEY_CHECKSUM           "Checksum"
 
 /** @struct manifest_file
  * Defines a manifest file
@@ -113,11 +125,12 @@ pgmoneta_generate_manifest(int version, uint64_t system_id, char* backup_data, s
  * Get the manifest record of a file
  * @param path The system path of the file
  * @param manifest_path The path to be used in manifest record entry
+ * @param last_modified Optional timestamp, defaults to current time if is 0
  * @param file [out] The json returning the manifest record
  * @return 0 on success, otherwise 1
  */
 int
-pgmoneta_get_file_manifest(char* path, char* manifest_path, struct json** file);
+pgmoneta_get_file_manifest(char* path, char* manifest_path, time_t last_modified, struct json** file);
 
 /**
  * Generate the files manifest (in json format)

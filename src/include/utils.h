@@ -1630,11 +1630,12 @@ pgmoneta_time_format(pgmoneta_time_t t, enum pgmoneta_time_format_t fmt, char** 
 /**
  * Convert a string into a uint64
  * @param str The string
- * @param number The number
+ * @param strict Whether to allow trailing none numeric characters
+ * @param number [out] The number
  * @return 0 on success, otherwise 1
  */
 int
-pgmoneta_string_to_uint64(char* str, uint64_t* number);
+pgmoneta_string_to_uint64(char* str, bool strict, uint64_t* number);
 
 #ifdef __cplusplus
 }

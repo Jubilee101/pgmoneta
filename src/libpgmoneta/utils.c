@@ -6355,7 +6355,7 @@ pgmoneta_get_lsn(uint32_t hi, uint32_t lo)
 }
 
 int
-pgmoneta_string_to_uint64(char* str, uint64_t* number)
+pgmoneta_string_to_uint64(char* str, bool strict, uint64_t* number)
 {
    unsigned long long n = 0;
    char* endptr;
@@ -6377,7 +6377,7 @@ pgmoneta_string_to_uint64(char* str, uint64_t* number)
       pgmoneta_log_error("No digits detected in the string %s", str);
       goto error;
    }
-   else if (*endptr != '\0')
+   else if (*endptr != '\0' && strict)
    {
       pgmoneta_log_error("Trailing non-numeric characters left in string %s", str);
       goto error;

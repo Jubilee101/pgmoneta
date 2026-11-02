@@ -45,18 +45,6 @@
 #include <string.h>
 #include <time.h>
 
-#define MANIFEST_KEY_VERSION                 "PostgreSQL-Backup-Manifest-Version"
-#define MANIFEST_KEY_SYS_IDENTIFIER          "System-Identifier"
-#define MANIFEST_KEY_FILES                   "Files"
-#define MANIFEST_KEY_WAL_RANGES              "WAL-Ranges"
-#define MANIFEST_KEY_CHECKSUM                "Manifest-Checksum"
-
-#define MANIFEST_FILE_KEY_CHECKSUM_ALGORITHM "Checksum-Algorithm"
-#define MANIFEST_FILE_KEY_PATH               "Path"
-#define MANIFEST_FILE_KEY_SIZE               "Size"
-#define MANIFEST_FILE_KEY_LAST_MODIFIED      "Last-Modified"
-#define MANIFEST_FILE_KEY_CHECKSUM           "Checksum"
-
 static void
 build_deque(struct deque* deque, struct csv_reader* reader, char** f);
 
@@ -495,7 +483,7 @@ error:
 }
 
 int
-pgmoneta_get_file_manifest(char* path, char* manifest_path, struct json** file)
+pgmoneta_get_file_manifest(char* path, char* manifest_path, time_t last_modified, struct json** file)
 {
    struct json* f = NULL;
    size_t size = 0;
@@ -509,7 +497,11 @@ pgmoneta_get_file_manifest(char* path, char* manifest_path, struct json** file)
 
    size = pgmoneta_get_file_size(path);
 
-   time(&t);
+   t = last_modified;
+   if (t == 0)
+   {
+      time(&t);
+   }
    gmtime_r(&t, &tm_buf);
    memset(now, 0, sizeof(now));
    strftime(now, sizeof(now), "%Y-%m-%d %H:%M:%S GMT", &tm_buf);
@@ -541,7 +533,7 @@ do_file_manifest(struct worker_common* wc)
    struct worker_input* wi = (struct worker_input*)wc;
    struct json* file = NULL;
 
-   if (pgmoneta_get_file_manifest(wi->from, wi->to, &file))
+   if (pgmoneta_get_file_manifest(wi->from, wi->to, 0, &file))
    {
       pgmoneta_record_failure(wi->common.workers->outcome, "Manifest failed: %s", wi->from);
       goto done;

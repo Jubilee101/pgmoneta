@@ -32,7 +32,9 @@
 #include <info.h>
 #include <json.h>
 #include <logging.h>
+#include <manifest.h>
 #include <migration.h>
+#include <security.h>
 #include <utils.h>
 #include <value.h>
 
@@ -77,6 +79,7 @@ struct pgbackrest_manifest
    int compression;
    char* backup_password;
    uint64_t db_system_id;
+   uint64_t db_version;
    struct art* files;
 };
 
@@ -87,7 +90,7 @@ struct timeline_history
    char lsn[18];
 };
 
-static int load_backup_info(char* source_dir, char* workspace, char** password, struct art** backup_info);
+static int load_backup_info(char* source_dir, char* workspace, char** password, struct art** backups);
 static int load_archive_password(char* source_wal_dir, char* workspace_dir, char** password);
 static void build_target_dir(char* source_dir, char* server, char** target_data_dir, char** target_wal_dir);
 static int migrate_pgbackrest(char* source_data_dir, char* source_wal_dir, char* target_base_dir, char* backup_id, char* server, char* workspace);
@@ -99,13 +102,13 @@ static int pgbackrest_backup_info_create(char* backup_id, struct json* info, str
 static void pgbackrest_backup_info_destroy(struct pgbackrest_backup_info* backup);
 static void pgbackrest_backup_info_destroy_cb(uintptr_t data);
 static void get_target_backup_id(time_t start_time, char** target_id);
-static int migrate_pgbackrest_backup(struct pgbackrest_backup_info* backup_info, char* password, char* root_workspace, char* source_dir, char* target_data_dir, char* target_wal_dir);
+static int migrate_pgbackrest_backup(struct art* backups, struct pgbackrest_backup_info* backup_info, char* password, char* root_workspace, char* source_dir, char* target_data_dir, char* target_wal_dir);
 static void pgbackrest_manifest_create(struct pgbackrest_manifest** manifest);
 static void pgbackrest_manifest_destroy(struct pgbackrest_manifest* manifest);
 static int pgbackrest_manifest_validate(struct pgbackrest_manifest* manifest);
 static int load_pgbackrest_manifest(char* password, char* source_backup_path, char* workspace, struct pgbackrest_manifest** manifest);
 static int parse_pgbackrest_manifest(char* path, struct pgbackrest_manifest** manifest);
-static int migrate_pgbackrest_file(struct pgbackrest_backup_info* backup_info, struct pgbackrest_manifest* manifest, char* relative_path, char* source_root_dir, char* target_root_dir, char* workspace_root_dir);
+static int migrate_pgbackrest_file(struct art* backups, struct pgbackrest_backup_info* backup_info, struct pgbackrest_manifest* manifest, struct json* pg_manifest, char* target_data_dir, char* relative_path, char* source_root_dir, char* target_root_dir, char* workspace_root_dir);
 static int create_file_directory(char* target_root_dir, char* workspace_root_dir, char* relative_path);
 static int create_file_placeholder(char* target_path);
 static int migrate_wal_segments(char* workspace, char* source_dir, char* target_dir);
@@ -113,14 +116,16 @@ static int extract_wal_segments(char* password, char* source_dir, char* target_d
 static int extract_wal_history(char* password, char* source_history, char* history_name, char* target_dir);
 static bool is_wal_dir(char* dir);
 static int extract_wal_file_info(char* file_name, char** seg_name, int* compression);
-static int pgbackrest_handle_pg_wal(uint32_t start_tli, uint32_t stop_tli, char* wal_dir, char* target_backup_data_path, char* wal_start, char* wal_stop, char* lsn_start, char* lsn_stop, struct json** wal_ranges);
-static int build_backup_manifest(char* target_backup_data_path, struct pgbackrest_manifest* manifest, struct pgbackrest_backup_info* backup_info);
+static int pgbackrest_handle_pg_wal(uint32_t start_tli, uint32_t stop_tli, char* wal_dir, char* target_backup_data_path, char* wal_start, char* wal_stop, char* lsn_start, char* lsn_stop, struct json* pg_manifest);
+static int write_backup_manifest(char* target_backup_data_path, struct json* pg_manifest);
 static int get_current_timeline(char* wal_name, uint32_t* tli);
 static int build_wal_ranges(char* lsn_start, char* lsn_stop, uint32_t start_tli, uint32_t stop_tli, char* history_path, struct json** wal_ranges);
 static int read_history(char* history_path, struct deque** switch_points);
 static int timeline_history_create(struct timeline_history** entry);
 static int wal_range_create(uint32_t tli, char* start_lsn, char* stop_lsn, struct json** range);
 static int build_backup_info(char* target_backup_data_path, char* target_backup_path);
+static int add_pg_manifest_info(struct pgbackrest_manifest* manifest, struct json* pg_manifest);
+static int get_and_set_file_manifest(struct art* backups, struct pgbackrest_backup_info* backup, char* reference_backup_id, char* target_data_dir, char* relative_path, struct pgbackrest_manifest* manifest, struct json* pg_manifest);
 
 int
 pgmoneta_migrate(char* backup_id, char* server, char* workspace)
@@ -154,6 +159,9 @@ pgmoneta_migrate(char* backup_id, char* server, char* workspace)
    {
       if (migrate_pgbackrest(source_data_dir, source_wal_dir, target_base_dir, backup_id, server, workspace))
       {
+         pgmoneta_log_error("Failed to migrate pgbackrest backup and archive,"
+                            "source data: %s, source wal: %s, target base: %s, backup id: %s, server %s, workspace %s",
+                            source_data_dir, source_wal_dir, target_base_dir, backup_id, server, workspace);
          goto error;
       }
    }
@@ -180,7 +188,7 @@ migrate_pgbackrest(char* source_data_dir, char* source_wal_dir, char* target_bas
 
    conf = (struct muse_configuration*)shmem;
 
-   pgmoneta_log_info("Start migration from pgBackRest, workspace %s", workspace);
+   pgmoneta_log_info("Start migration from pgB_file_sha256_checksumackRest, workspace %s", workspace);
    build_target_dir(target_base_dir, server, &target_data_dir, &target_wal_dir);
    if (pgmoneta_exists(target_data_dir))
    {
@@ -232,7 +240,7 @@ migrate_pgbackrest(char* source_data_dir, char* source_wal_dir, char* target_bas
          pgmoneta_log_error("Failed to find parent backup %s", parent_backup_id);
          goto error;
       }
-      if (migrate_pgbackrest_backup(b, password, workspace, source_data_dir, target_data_dir, target_wal_dir))
+      if (migrate_pgbackrest_backup(backups, b, password, workspace, source_data_dir, target_data_dir, target_wal_dir))
       {
          pgmoneta_log_error("Failed to migrate backup %s", b->backup_id);
          goto error;
@@ -241,7 +249,7 @@ migrate_pgbackrest(char* source_data_dir, char* source_wal_dir, char* target_bas
    }
 
    pgmoneta_log_info("Start migrating backup %s", bck->backup_id);
-   if (migrate_pgbackrest_backup(bck, password, workspace, source_data_dir, target_data_dir, target_wal_dir))
+   if (migrate_pgbackrest_backup(backups, bck, password, workspace, source_data_dir, target_data_dir, target_wal_dir))
    {
       pgmoneta_log_error("Failed to migrate backup %s", bck->backup_id);
       goto error;
@@ -735,7 +743,7 @@ get_target_backup_id(time_t start_time, char** target_id)
 }
 
 static int
-migrate_pgbackrest_backup(struct pgbackrest_backup_info* backup_info, char* password, char* root_workspace, char* source_dir, char* target_data_dir, char* target_wal_dir)
+migrate_pgbackrest_backup(struct art* backups, struct pgbackrest_backup_info* backup_info, char* password, char* root_workspace, char* source_dir, char* target_data_dir, char* target_wal_dir)
 {
    char* target_backup_id = NULL;
    char source_backup_path[MAX_PATH];
@@ -748,10 +756,17 @@ migrate_pgbackrest_backup(struct pgbackrest_backup_info* backup_info, char* pass
    uint32_t stop_tli = 0;
    struct pgbackrest_manifest* manifest = NULL;
    struct art_iterator* iter = NULL;
-   struct json* wal_ranges = NULL;
+   struct json* pg_manifest = NULL;
 
    if (pgbackrest_backup_info_validate(backup_info))
    {
+      pgmoneta_log_error("Failed to validate backup info");
+      goto error;
+   }
+
+   if (pgmoneta_json_create(&pg_manifest))
+   {
+      pgmoneta_log_error("Failed to created pg manifest json");
       goto error;
    }
 
@@ -817,18 +832,34 @@ migrate_pgbackrest_backup(struct pgbackrest_backup_info* backup_info, char* pass
       {
          continue;
       }
-      if (migrate_pgbackrest_file(backup_info, manifest, iter->key, source_backup_data_path, target_backup_data_path, data_workspace))
+      if (migrate_pgbackrest_file(backups, backup_info, manifest, pg_manifest, target_data_dir, iter->key, source_backup_data_path, target_backup_data_path, data_workspace))
       {
+         pgmoneta_log_error("Failed to migrate pgbackrest file: %s from %s to %s", iter->key, source_backup_data_path, target_backup_data_path);
          goto error;
       }
    }
+
+   if (add_pg_manifest_info(manifest, pg_manifest))
+   {
+      pgmoneta_log_error("Failed to add manifest info to pg manifest");
+      goto error;
+   }
+
    //copy WAL segments
+   pgmoneta_log_info("Start copying WAL segments to pg_wal");
+
    if (pgbackrest_handle_pg_wal(start_tli, stop_tli, target_wal_dir,
                                 target_backup_data_path, backup_info->archive_start,
                                 backup_info->archive_stop, backup_info->lsn_start,
-                                backup_info->lsn_stop, &wal_ranges))
+                                backup_info->lsn_stop, pg_manifest))
    {
       pgmoneta_log_error("Failed to copy WAL segments from %s", target_wal_dir);
+      goto error;
+   }
+
+   if (write_backup_manifest(target_backup_data_path, pg_manifest))
+   {
+      pgmoneta_log_error("Failed to write manifest to %s", target_backup_data_path);
       goto error;
    }
 
@@ -837,11 +868,13 @@ migrate_pgbackrest_backup(struct pgbackrest_backup_info* backup_info, char* pass
    //TODO: wf_migration: compress, encrypt, link
    pgmoneta_art_iterator_destroy(iter);
    pgbackrest_manifest_destroy(manifest);
+   pgmoneta_json_destroy(pg_manifest);
    free(target_backup_id);
    return 0;
 error:
    pgmoneta_art_iterator_destroy(iter);
    pgbackrest_manifest_destroy(manifest);
+   pgmoneta_json_destroy(pg_manifest);
    free(target_backup_id);
    return 1;
 }
@@ -887,6 +920,11 @@ pgbackrest_manifest_validate(struct pgbackrest_manifest* manifest)
       pgmoneta_log_error("Expecting database system ID in the manifest");
       goto error;
    }
+   if (manifest->db_version <= 14)
+   {
+      pgmoneta_log_error("Backup db version is below 15: %" PRIu64, manifest->db_version);
+      goto error;
+   }
    return 0;
 error:
    return 1;
@@ -915,15 +953,18 @@ load_pgbackrest_manifest(char* password, char* source_backup_path, char* workspa
                                         manifest_path,
                                         dest))
    {
+      pgmoneta_log_error("Failed to decrypt manifest %s to %s", manifest_path, dest);
       goto error;
    }
    pgmoneta_log_info("parsing manifest %s", dest);
    if (parse_pgbackrest_manifest(dest, &m))
    {
+      pgmoneta_log_error("Failed to parse manifest at %s", dest);
       goto error;
    }
    if (pgbackrest_manifest_validate(m))
    {
+      pgmoneta_log_error("Failed to validate manifest at %s", dest);
       goto error;
    }
    *manifest = m;
@@ -1037,9 +1078,19 @@ parse_pgbackrest_manifest(char* path, struct pgbackrest_manifest** manifest)
       }
       else if (pgmoneta_compare_string("db-system-id", &key[0]))
       {
-         if (pgmoneta_string_to_uint64(value, &m->db_system_id))
+         if (pgmoneta_string_to_uint64(value, true, &m->db_system_id))
          {
             pgmoneta_log_error("Failed to get system ID from %s", value);
+            goto error;
+         }
+      }
+      else if (pgmoneta_compare_string("db-version", &key[0]))
+      {
+         // remove the double quotes
+         value[strlen(value) - 1] = 0;
+         if (pgmoneta_string_to_uint64(value[1], false, &m->db_version))
+         {
+            pgmoneta_log_error("Failed to get db version from %s", value);
             goto error;
          }
       }
@@ -1063,13 +1114,14 @@ error:
 }
 
 static int
-migrate_pgbackrest_file(struct pgbackrest_backup_info* backup_info, struct pgbackrest_manifest* manifest, char* relative_path, char* source_root_dir, char* target_root_dir, char* workspace_root_dir)
+migrate_pgbackrest_file(struct art* backups, struct pgbackrest_backup_info* backup_info, struct pgbackrest_manifest* manifest, struct json* pg_manifest, char* target_data_dir, char* relative_path, char* source_root_dir, char* target_root_dir, char* workspace_root_dir)
 {
    char* source_file_path = NULL;
    char* target_file_path = NULL;
    char* workspace_file_path = NULL;
    struct json* file_info = NULL;
    char* target_backup_id = NULL;
+   char* reference_backup_id = NULL;
 
    source_file_path = pgmoneta_format_and_append(source_file_path, "%s%s", source_root_dir, relative_path);
    target_file_path = pgmoneta_format_and_append(target_file_path, "%s%s", target_root_dir, relative_path);
@@ -1116,6 +1168,11 @@ migrate_pgbackrest_file(struct pgbackrest_backup_info* backup_info, struct pgbac
    {
       // full file, decrypt and copy to workspace first
       // TODO: handle non encrypted case
+      reference_backup_id = (char*)pgmoneta_json_get(file_info, PGBACKREST_FILE_REFERENCE);
+      if (reference_backup_id == NULL)
+      {
+         pgmoneta_log_error("Failed to get reference backup ID");
+      }
       if (pgmoneta_cbc_decrypt_salted_file(CBC_DIGEST_DEFAULT,
                                            false,
                                            (unsigned char*)manifest->backup_password,
@@ -1139,6 +1196,12 @@ migrate_pgbackrest_file(struct pgbackrest_backup_info* backup_info, struct pgbac
          pgmoneta_log_error("Failed to create placeholder for file %s ", target_file_path);
          goto error;
       }
+   }
+
+   if (get_and_set_file_manifest(backups, backup_info, reference_backup_id, target_data_dir, relative_path, manifest, pg_manifest))
+   {
+      pgmoneta_log_error("Failed to get or set sha512 checksum of file %s, backup ID %s", relative_path, backup_info->backup_id);
+      goto error;
    }
 
    free(source_file_path);
@@ -1170,6 +1233,7 @@ create_file_directory(char* target_root_dir, char* workspace_root_dir, char* rel
       pgmoneta_log_debug("Creating directory for %s", dir);
       if (pgmoneta_mkdir(dir))
       {
+         pgmoneta_log_error("Failed to create dir %s", dir);
          goto error;
       }
    }
@@ -1179,6 +1243,7 @@ create_file_directory(char* target_root_dir, char* workspace_root_dir, char* rel
       pgmoneta_log_debug("Creating workspace directory for %s", wspc_dir);
       if (pgmoneta_mkdir(wspc_dir))
       {
+         pgmoneta_log_error("Failed to create dir %s", wspc_dir);
          goto error;
       }
    }
@@ -1344,6 +1409,7 @@ extract_wal_segments(char* password, char* source_dir, char* target_dir)
 
       if (pgmoneta_decompress_file(target_path, final_path, compression, NULL))
       {
+         pgmoneta_log_error("Failed to decompress %s to %s, compression mode %d", target_path, final_path, compression);
          goto error;
       }
 
@@ -1485,7 +1551,7 @@ error:
 }
 
 static int
-pgbackrest_handle_pg_wal(uint32_t start_tli, uint32_t stop_tli, char* wal_dir, char* target_backup_data_path, char* wal_start, char* wal_stop, char* lsn_start, char* lsn_stop, struct json** wal_ranges)
+pgbackrest_handle_pg_wal(uint32_t start_tli, uint32_t stop_tli, char* wal_dir, char* target_backup_data_path, char* wal_start, char* wal_stop, char* lsn_start, char* lsn_stop, struct json* pg_manifest)
 {
    char achv_stat_path[MAX_PATH];
    char summaries_path[MAX_PATH];
@@ -1496,15 +1562,21 @@ pgbackrest_handle_pg_wal(uint32_t start_tli, uint32_t stop_tli, char* wal_dir, c
    char wal_history_to[MAX_PATH];
    DIR* dir;
    char* history_path = NULL;
+   struct json* wal_ranges = NULL;
    struct dirent* entry;
+   bool ranges_added = false;
 
    pgmoneta_log_info("Copying WAL segments ranging from %s to %s", wal_start, wal_stop);
 
    memset(achv_stat_path, 0, sizeof(achv_stat_path));
    memset(summaries_path, 0, sizeof(summaries_path));
 
-   if (wal_dir == NULL || target_backup_data_path == NULL || wal_start == NULL || wal_stop == NULL)
+   if (wal_dir == NULL || target_backup_data_path == NULL ||
+       wal_start == NULL || wal_stop == NULL ||
+       lsn_start == NULL || lsn_stop == NULL ||
+       pg_manifest == NULL)
    {
+      pgmoneta_log_error("Invalid input for pgbackrest_handle_pg_wal");
       goto error;
    }
 
@@ -1586,27 +1658,44 @@ pgbackrest_handle_pg_wal(uint32_t start_tli, uint32_t stop_tli, char* wal_dir, c
       }
    }
 
-   if (build_wal_ranges(lsn_start, lsn_stop, start_tli, stop_tli, history_path, wal_ranges))
+   if (build_wal_ranges(lsn_start, lsn_stop, start_tli, stop_tli, history_path, &wal_ranges))
    {
       pgmoneta_log_error("Failed to build the WAL range");
       goto error;
    }
+
+   if (pgmoneta_json_put(pg_manifest, MANIFEST_KEY_WAL_RANGES, (uintptr_t)pg_manifest, ValueJSON))
+   {
+      pgmoneta_json_destroy(wal_ranges);
+      goto error;
+   }
+   pgmoneta_log_info("Successfully built and added wal ranges to postgres manifest");
+   ranges_added = true;
+
    return 0;
 error:
    if (dir != NULL)
    {
       closedir(dir);
    }
+   if (!ranges_added)
+   {
+      pgmoneta_json_destroy(wal_ranges);
+   }
    return 1;
 }
 
 static int
-build_backup_manifest(char* target_backup_data_path, struct pgbackrest_manifest* manifest, struct pgbackrest_backup_info* backup_info)
+write_backup_manifest(char* target_backup_data_path, struct json* pg_manifest)
 {
    char* manifest_path = NULL;
-   struct json* manifest = NULL;
    manifest_path = pgmoneta_format_and_append(manifest_path, "%sbackup_manifest", target_backup_data_path);
-
+   pgmoneta_log_info("Writing backup manifest to %s", manifest_path);
+   if (pgmoneta_write_postgresql_manifest(pg_manifest, manifest_path))
+   {
+      pgmoneta_log_error("Failed to write PostgreSQL manifest at %s", manifest_path);
+      goto error;
+   }
    free(manifest_path);
    return 0;
 error:
@@ -1783,18 +1872,22 @@ wal_range_create(uint32_t tli, char* start_lsn, char* stop_lsn, struct json** ra
    *range = NULL;
    if (pgmoneta_json_create(&r))
    {
+      pgmoneta_log_error("Failed to create range json");
       goto error;
    }
    if (pgmoneta_json_put(r, "Timeline", (uintptr_t)tli, ValueUInt32))
    {
+      pgmoneta_log_error("Failed to put timeline");
       goto error;
    }
    if (pgmoneta_json_put(r, "Start-LSN", (uintptr_t)start_lsn, ValueString))
    {
+      pgmoneta_log_error("Failed to put start LSN");
       goto error;
    }
    if (pgmoneta_json_put(r, "End-LSN", (uintptr_t)stop_lsn, ValueString))
    {
+      pgmoneta_log_error("Failed to put end LSN");
       goto error;
    }
    *range = r;
@@ -1807,4 +1900,112 @@ error:
 static int
 build_backup_info(char* target_backup_data_path, char* target_backup_path)
 {
+}
+
+static int
+add_pg_manifest_info(struct pgbackrest_manifest* manifest, struct json* pg_manifest)
+{
+   if (manifest == NULL || pg_manifest == NULL)
+   {
+      pgmoneta_log_error("Invalid input for add_pg_manifest_info");
+      goto error;
+   }
+   if (manifest->db_version < 13)
+   {
+      pgmoneta_log_error("manifest is not supported for postgres version below 13");
+      goto error;
+   }
+   if (manifest->db_version < 17)
+   {
+      if (pgmoneta_json_put(pg_manifest, MANIFEST_KEY_VERSION, 1, ValueUInt32))
+      {
+         pgmoneta_log_error("Failed to put manifest version");
+         goto error;
+      }
+   }
+   else
+   {
+      if (pgmoneta_json_put(pg_manifest, MANIFEST_KEY_VERSION, 2, ValueUInt32))
+      {
+         pgmoneta_log_error("Failed to put manifest version");
+         goto error;
+      }
+      if (pgmoneta_json_put(pg_manifest, MANIFEST_KEY_SYS_IDENTIFIER, manifest->db_system_id, ValueUInt64))
+      {
+         pgmoneta_log_error("Failed to put system identifier");
+         goto error;
+      }
+   }
+
+   return 0;
+error:
+   return 1;
+}
+
+static int
+get_and_set_file_manifest(struct art* backups, struct pgbackrest_backup_info* backup, char* reference_backup_id, char* target_data_dir, char* relative_path, struct pgbackrest_manifest* manifest, struct json* pg_manifest)
+{
+   char* target_bck_id = NULL;
+   char* file_path = NULL;
+   struct json* file = NULL;
+   struct json* pg_file = NULL;
+   struct json* pg_files = NULL;
+   time_t timestamp;
+   struct pgbackrest_backup_info* bck = NULL;
+
+   if (backup == NULL)
+   {
+      goto error;
+   }
+
+   bck = backup;
+   if (reference_backup_id != NULL)
+   {
+      bck = (struct pgbackrest_backup_info*)pgmoneta_art_search(reference_backup_id, backups);
+      if (bck == NULL)
+      {
+         pgmoneta_log_error("failed to get backup %s", reference_backup_id);
+         goto error;
+      }
+   }
+
+   file = (struct json*)pgmoneta_art_search(manifest->files, relative_path);
+   if (file == NULL)
+   {
+      pgmoneta_log_error("Failed to find %s inside manifest", relative_path);
+      goto error;
+   }
+   timestamp = (time_t)pgmoneta_json_get(file, "timestamp");
+   if (timestamp == 0)
+   {
+      pgmoneta_log_error("Failed to find timestamp inside file manifest %s", relative_path);
+      goto error;
+   }
+
+   pg_files = (struct json*)pgmoneta_json_get(pg_manifest, MANIFEST_KEY_FILES);
+   if (pg_files == NULL)
+   {
+      pgmoneta_json_create(&pg_file);
+   }
+   pgmoneta_json_put(pg_manifest, MANIFEST_KEY_FILES, (uintptr_t)pg_files, ValueJSON);
+
+   get_target_backup_id(bck->start_time, &target_bck_id);
+   file_path = pgmoneta_format_and_append(file_path, "%s%s/%s", target_data_dir, target_bck_id, relative_path);
+
+   //TODO: relative path might not be the manifest path for table spaces, need to handle differently
+   if (pgmoneta_get_file_manifest(file_path, relative_path, timestamp, &pg_file))
+   {
+      pgmoneta_log_error("Failed to get manifest of file %s", file_path);
+      goto error;
+   }
+
+   pgmoneta_json_append(pg_manifest, (uintptr_t)file, ValueJSON);
+
+   free(target_bck_id);
+   free(file_path);
+   return 0;
+error:
+   free(file_path);
+   free(target_bck_id);
+   return 1;
 }
