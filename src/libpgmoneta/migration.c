@@ -118,12 +118,12 @@ static bool is_wal_dir(char* dir);
 static int extract_wal_file_info(char* file_name, char** seg_name, int* compression);
 static int pgbackrest_handle_pg_wal(uint32_t start_tli, uint32_t stop_tli, char* wal_dir, char* target_backup_data_path, char* wal_start, char* wal_stop, char* lsn_start, char* lsn_stop, struct json* pg_manifest);
 static int write_backup_manifest(char* target_backup_data_path, struct json* pg_manifest);
+static int set_backup_info(char* target_backup_data_path, struct pgbackrest_backup_info* backup_info, struct pgbackrest_manifest* manifest, struct backup** backup);
 static int get_current_timeline(char* wal_name, uint32_t* tli);
 static int build_wal_ranges(char* lsn_start, char* lsn_stop, uint32_t start_tli, uint32_t stop_tli, char* history_path, struct json** wal_ranges);
 static int read_history(char* history_path, struct deque** switch_points);
 static int timeline_history_create(struct timeline_history** entry);
 static int wal_range_create(uint32_t tli, char* start_lsn, char* stop_lsn, struct json** range);
-static int build_backup_info(char* target_backup_data_path, char* target_backup_path);
 static int add_pg_manifest_info(struct pgbackrest_manifest* manifest, struct json* pg_manifest);
 static int get_and_set_file_manifest(struct art* backups, struct pgbackrest_backup_info* backup, char* reference_backup_id, char* target_data_dir, char* relative_path, struct pgbackrest_manifest* manifest, struct json* pg_manifest);
 
@@ -754,6 +754,7 @@ migrate_pgbackrest_backup(struct art* backups, struct pgbackrest_backup_info* ba
    char data_workspace[MAX_PATH];
    uint32_t start_tli = 0;
    uint32_t stop_tli = 0;
+   struct backup* backup = NULL;
    struct pgbackrest_manifest* manifest = NULL;
    struct art_iterator* iter = NULL;
    struct json* pg_manifest = NULL;
@@ -863,19 +864,32 @@ migrate_pgbackrest_backup(struct art* backups, struct pgbackrest_backup_info* ba
       goto error;
    }
 
-   //TODO: build backup_manifest and backup.manifest
-   //TODO: build backup.info
-   //TODO: wf_migration: compress, encrypt, link
+   if (set_backup_info(target_backup_data_path, backup_info, manifest, &backup))
+   {
+      pgmoneta_log_error("Failed to set backup info %s", target_backup_path);
+      goto error;
+   }
+
+   //TODO: wf_migration: manifest, compress, encrypt, link
+   backup->backup_size = pgmoneta_directory_size(target_backup_path);
+   pgmoneta_log_info("Writing backup info to %s%s/backup.info", target_data_dir, backup->label);
+   if (pgmoneta_save_info(target_data_dir, backup))
+   {
+      pgmoneta_log_error("Failed to write backup info to %s%s/backup.info", target_data_dir, backup->label);
+      goto error;
+   }
    pgmoneta_art_iterator_destroy(iter);
    pgbackrest_manifest_destroy(manifest);
    pgmoneta_json_destroy(pg_manifest);
    free(target_backup_id);
+   free(backup);
    return 0;
 error:
    pgmoneta_art_iterator_destroy(iter);
    pgbackrest_manifest_destroy(manifest);
    pgmoneta_json_destroy(pg_manifest);
    free(target_backup_id);
+   free(backup);
    return 1;
 }
 
@@ -1704,6 +1718,81 @@ error:
 }
 
 static int
+set_backup_info(char* target_backup_data_path, struct pgbackrest_backup_info* backup_info, struct pgbackrest_manifest* manifest, struct backup** backup)
+{
+   struct backup* bck = NULL;
+   char* wal = NULL;
+   char* label = NULL;
+   struct art_iterator* iter = NULL;
+   struct muse_configuration* conf = NULL;
+
+   conf = (struct muse_configuration*)shmem;
+   get_target_backup_id(backup_info->start_time, &label);
+   bck = (struct backup*)malloc(sizeof(struct backup));
+   memset(bck, 0, sizeof(struct backup));
+
+   bck->valid = VALID_TRUE;
+   //TODO: handle tablespaces
+   bck->number_of_tablespaces = 0;
+   bck->compression = conf->compression;
+   bck->encryption = conf->encryption;
+   memcpy(bck->label, label, strlen(label));
+   if (pgmoneta_read_wal(target_backup_data_path, &wal))
+   {
+      pgmoneta_log_error("Failed to get wal from %spg_wal/", target_backup_data_path);
+      goto error;
+   }
+   memcpy(bck->wal, wal, strlen(wal));
+
+   bck->restore_size = backup_info->restore_size;
+
+   if (pgmoneta_art_iterator_create(manifest->files, &iter))
+   {
+      pgmoneta_log_error("Failed to create files interator");
+      goto error;
+   }
+   while (pgmoneta_art_iterator_next(iter))
+   {
+      struct json* file = (struct json*)pgmoneta_value_data(iter->value);
+      size_t size = (size_t)pgmoneta_json_get(file, "size");
+      if (size > bck->biggest_file_size)
+      {
+         bck->biggest_file_size = size;
+      }
+   }
+   bck->major_version = manifest->db_version;
+   //TODO: handle minor version
+   bck->keep = false;
+   sscanf(backup_info->lsn_start, "%X/%X", &bck->start_lsn_hi32, &bck->start_lsn_lo32);
+   sscanf(backup_info->lsn_stop, "%X/%X", &bck->end_lsn_hi32, &bck->end_lsn_lo32);
+   if (get_current_timeline(backup_info->archive_start, &bck->start_timeline))
+   {
+      pgmoneta_log_error("Failed to extract current timeline from %s", backup_info->archive_start);
+      goto error;
+   }
+
+   if (get_current_timeline(backup_info->archive_stop, &bck->end_timeline))
+   {
+      pgmoneta_log_error("Failed to extract current timeline from %s", backup_info->archive_stop);
+      goto error;
+   }
+   // TODO: all backups are considered full for now until block level incremental is introduced
+   bck->type = TYPE_FULL;
+
+   *backup = bck;
+
+   pgmoneta_art_iterator_destroy(iter);
+   free(label);
+   free(wal);
+   return 0;
+error:
+   pgmoneta_art_iterator_destroy(iter);
+   free(wal);
+   free(label);
+   return 1;
+}
+
+static int
 get_current_timeline(char* wal_name, uint32_t* tli)
 {
    uint32_t t = 0;
@@ -1898,11 +1987,6 @@ error:
 }
 
 static int
-build_backup_info(char* target_backup_data_path, char* target_backup_path)
-{
-}
-
-static int
 add_pg_manifest_info(struct pgbackrest_manifest* manifest, struct json* pg_manifest)
 {
    if (manifest == NULL || pg_manifest == NULL)
@@ -1985,9 +2069,13 @@ get_and_set_file_manifest(struct art* backups, struct pgbackrest_backup_info* ba
    pg_files = (struct json*)pgmoneta_json_get(pg_manifest, MANIFEST_KEY_FILES);
    if (pg_files == NULL)
    {
-      pgmoneta_json_create(&pg_file);
+      pgmoneta_json_create(&pg_files);
+      if (pgmoneta_json_put(pg_manifest, MANIFEST_KEY_FILES, (uintptr_t)pg_files, ValueJSON))
+      {
+         pgmoneta_log_error("Failed to put files into manifest");
+         goto error;
+      }
    }
-   pgmoneta_json_put(pg_manifest, MANIFEST_KEY_FILES, (uintptr_t)pg_files, ValueJSON);
 
    get_target_backup_id(bck->start_time, &target_bck_id);
    file_path = pgmoneta_format_and_append(file_path, "%s%s/%s", target_data_dir, target_bck_id, relative_path);
@@ -1999,7 +2087,11 @@ get_and_set_file_manifest(struct art* backups, struct pgbackrest_backup_info* ba
       goto error;
    }
 
-   pgmoneta_json_append(pg_manifest, (uintptr_t)file, ValueJSON);
+   if (pgmoneta_json_append(pg_files, (uintptr_t)pg_file, ValueJSON))
+   {
+      pgmoneta_log_error("Failed to add file to file array: %s", relative_path);
+      goto error;
+   }
 
    free(target_bck_id);
    free(file_path);
