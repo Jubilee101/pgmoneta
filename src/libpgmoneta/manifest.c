@@ -907,3 +907,73 @@ error:
 
    return 1;
 }
+
+int
+pgmoneta_manifest_write_directory_entries(struct csv_writer* writer, char* base, char* relative)
+{
+   DIR* dir = NULL;
+   struct dirent* entry = NULL;
+   char path[MAX_PATH];
+   char child[MAX_PATH];
+   char row[MAX_PATH];
+   char probe[MAX_PATH];
+   struct stat sb;
+   bool is_dir = false;
+   char* info[MANIFEST_COLUMN_COUNT];
+
+   if (pgmoneta_snprintf(path, sizeof(path), "%s%s%s", base,
+                         strlen(relative) > 0 ? "/" : "", relative) <= 0)
+   {
+      return 1;
+   }
+
+   if (!(dir = opendir(path)))
+   {
+      return 1;
+   }
+
+   while ((entry = readdir(dir)) != NULL)
+   {
+      is_dir = (entry->d_type == DT_DIR);
+
+      if (pgmoneta_compare_string(entry->d_name, ".") || pgmoneta_compare_string(entry->d_name, ".."))
+      {
+         continue;
+      }
+
+      /* some filesystems do not populate d_type */
+      if (entry->d_type == DT_UNKNOWN &&
+          pgmoneta_snprintf(probe, sizeof(probe), "%s/%s", path, entry->d_name) > 0 &&
+          stat(probe, &sb) == 0)
+      {
+         is_dir = S_ISDIR(sb.st_mode);
+      }
+
+      if (!is_dir)
+      {
+         continue;
+      }
+
+      if (pgmoneta_snprintf(child, sizeof(child), "%s%s%s",
+                            relative, strlen(relative) > 0 ? "/" : "", entry->d_name) <= 0 ||
+          pgmoneta_snprintf(row, sizeof(row), "%s/", child) <= 0)
+      {
+         closedir(dir);
+         return 1;
+      }
+
+      info[MANIFEST_PATH_INDEX] = row;
+      info[MANIFEST_CHECKSUM_INDEX] = "-";
+      pgmoneta_csv_write(writer, MANIFEST_COLUMN_COUNT, info);
+
+      if (write_directory_entries(writer, base, child))
+      {
+         closedir(dir);
+         return 1;
+      }
+   }
+
+   closedir(dir);
+
+   return 0;
+}

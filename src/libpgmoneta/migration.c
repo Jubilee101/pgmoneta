@@ -40,6 +40,7 @@
 
 // system
 #include <assert.h>
+#include <csv.h>
 #include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
@@ -108,7 +109,7 @@ static void pgbackrest_manifest_destroy(struct pgbackrest_manifest* manifest);
 static int pgbackrest_manifest_validate(struct pgbackrest_manifest* manifest);
 static int load_pgbackrest_manifest(char* password, char* source_backup_path, char* workspace, struct pgbackrest_manifest** manifest);
 static int parse_pgbackrest_manifest(char* path, struct pgbackrest_manifest** manifest);
-static int migrate_pgbackrest_file(struct art* backups, struct pgbackrest_backup_info* backup_info, struct pgbackrest_manifest* manifest, struct json* pg_manifest, char* target_data_dir, char* relative_path, char* source_root_dir, char* target_root_dir, char* workspace_root_dir);
+static int migrate_pgbackrest_file(struct art* backups, struct pgbackrest_backup_info* backup_info, struct pgbackrest_manifest* manifest, struct json* pg_manifest, char* target_data_dir, char* relative_path, char* source_root_dir, char* target_root_dir, char* workspace_root_dir, struct csv_writer* writer);
 static int create_file_directory(char* target_root_dir, char* workspace_root_dir, char* relative_path);
 static int create_file_placeholder(char* target_path);
 static int migrate_wal_segments(char* workspace, char* source_dir, char* target_dir);
@@ -125,7 +126,7 @@ static int read_history(char* history_path, struct deque** switch_points);
 static int timeline_history_create(struct timeline_history** entry);
 static int wal_range_create(uint32_t tli, char* start_lsn, char* stop_lsn, struct json** range);
 static int add_pg_manifest_info(struct pgbackrest_manifest* manifest, struct json* pg_manifest);
-static int get_and_set_file_manifest(struct art* backups, struct pgbackrest_backup_info* backup, char* reference_backup_id, char* target_data_dir, char* relative_path, struct pgbackrest_manifest* manifest, struct json* pg_manifest);
+static int get_and_set_file_manifest(struct art* backups, struct pgbackrest_backup_info* backup, char* reference_backup_id, char* target_data_dir, char* relative_path, struct pgbackrest_manifest* manifest, struct json* pg_manifest, struct csv_writer* writer);
 
 int
 pgmoneta_migrate(char* backup_id, char* server, char* workspace)
@@ -758,6 +759,8 @@ migrate_pgbackrest_backup(struct art* backups, struct pgbackrest_backup_info* ba
    struct pgbackrest_manifest* manifest = NULL;
    struct art_iterator* iter = NULL;
    struct json* pg_manifest = NULL;
+   struct csv_writer* writer = NULL;
+   char* manifest_path = NULL;
 
    if (pgbackrest_backup_info_validate(backup_info))
    {
@@ -785,6 +788,7 @@ migrate_pgbackrest_backup(struct art* backups, struct pgbackrest_backup_info* ba
    snprintf(source_backup_data_path, sizeof(source_backup_data_path), "%s%s/pg_data/", source_dir, backup_info->backup_id);
    snprintf(target_backup_data_path, sizeof(target_backup_data_path), "%s%s/data/", target_data_dir, target_backup_id);
    snprintf(data_workspace, sizeof(data_workspace), "%s%s/data/", root_workspace, backup_info->backup_id);
+   manifest_path = pgmoneta_format_and_append(manifest_path, "%s%s", target_data_dir, "backup.manifest");
 
    pgmoneta_log_info("Start to migrate backup %s from %s to %s", backup_info->backup_id, source_backup_path, target_backup_path);
    if (get_current_timeline(backup_info->archive_start, &start_tli))
@@ -826,6 +830,12 @@ migrate_pgbackrest_backup(struct art* backups, struct pgbackrest_backup_info* ba
       goto error;
    }
 
+   if (pgmoneta_csv_writer_init(manifest_path, &writer))
+   {
+      pgmoneta_log_error("Could not create csv writer for %s", manifest_path);
+      goto error;
+   }
+
    pgmoneta_art_iterator_create(manifest->files, &iter);
    while (pgmoneta_art_iterator_next(iter))
    {
@@ -833,11 +843,17 @@ migrate_pgbackrest_backup(struct art* backups, struct pgbackrest_backup_info* ba
       {
          continue;
       }
-      if (migrate_pgbackrest_file(backups, backup_info, manifest, pg_manifest, target_data_dir, iter->key, source_backup_data_path, target_backup_data_path, data_workspace))
+      if (migrate_pgbackrest_file(backups, backup_info, manifest, pg_manifest, target_data_dir, iter->key, source_backup_data_path, target_backup_data_path, data_workspace, writer))
       {
          pgmoneta_log_error("Failed to migrate pgbackrest file: %s from %s to %s", iter->key, source_backup_data_path, target_backup_data_path);
          goto error;
       }
+   }
+
+   if (pgmoneta_manifest_write_directory_entries(writer, target_backup_data_path, ""))
+   {
+      pgmoneta_log_error("Could not record directory layout in %s", manifest);
+      goto error;
    }
 
    if (add_pg_manifest_info(manifest, pg_manifest))
@@ -871,6 +887,7 @@ migrate_pgbackrest_backup(struct art* backups, struct pgbackrest_backup_info* ba
    }
 
    //TODO: wf_migration: manifest, compress, encrypt, link
+
    backup->backup_size = pgmoneta_directory_size(target_backup_path);
    pgmoneta_log_info("Writing backup info to %s%s/backup.info", target_data_dir, backup->label);
    if (pgmoneta_save_info(target_data_dir, backup))
@@ -881,6 +898,8 @@ migrate_pgbackrest_backup(struct art* backups, struct pgbackrest_backup_info* ba
    pgmoneta_art_iterator_destroy(iter);
    pgbackrest_manifest_destroy(manifest);
    pgmoneta_json_destroy(pg_manifest);
+   pgmoneta_csv_writer_destroy(writer);
+   free(manifest_path);
    free(target_backup_id);
    free(backup);
    return 0;
@@ -888,6 +907,8 @@ error:
    pgmoneta_art_iterator_destroy(iter);
    pgbackrest_manifest_destroy(manifest);
    pgmoneta_json_destroy(pg_manifest);
+   pgmoneta_csv_writer_destroy(writer);
+   free(manifest_path);
    free(target_backup_id);
    free(backup);
    return 1;
@@ -1128,7 +1149,7 @@ error:
 }
 
 static int
-migrate_pgbackrest_file(struct art* backups, struct pgbackrest_backup_info* backup_info, struct pgbackrest_manifest* manifest, struct json* pg_manifest, char* target_data_dir, char* relative_path, char* source_root_dir, char* target_root_dir, char* workspace_root_dir)
+migrate_pgbackrest_file(struct art* backups, struct pgbackrest_backup_info* backup_info, struct pgbackrest_manifest* manifest, struct json* pg_manifest, char* target_data_dir, char* relative_path, char* source_root_dir, char* target_root_dir, char* workspace_root_dir, struct csv_writer* writer)
 {
    char* source_file_path = NULL;
    char* target_file_path = NULL;
@@ -1212,7 +1233,7 @@ migrate_pgbackrest_file(struct art* backups, struct pgbackrest_backup_info* back
       }
    }
 
-   if (get_and_set_file_manifest(backups, backup_info, reference_backup_id, target_data_dir, relative_path, manifest, pg_manifest))
+   if (get_and_set_file_manifest(backups, backup_info, reference_backup_id, target_data_dir, relative_path, manifest, pg_manifest, writer))
    {
       pgmoneta_log_error("Failed to get or set sha512 checksum of file %s, backup ID %s", relative_path, backup_info->backup_id);
       goto error;
@@ -2027,7 +2048,7 @@ error:
 }
 
 static int
-get_and_set_file_manifest(struct art* backups, struct pgbackrest_backup_info* backup, char* reference_backup_id, char* target_data_dir, char* relative_path, struct pgbackrest_manifest* manifest, struct json* pg_manifest)
+get_and_set_file_manifest(struct art* backups, struct pgbackrest_backup_info* backup, char* reference_backup_id, char* target_data_dir, char* relative_path, struct pgbackrest_manifest* manifest, struct json* pg_manifest, struct csv_writer* writer)
 {
    char* target_bck_id = NULL;
    char* file_path = NULL;
@@ -2036,6 +2057,7 @@ get_and_set_file_manifest(struct art* backups, struct pgbackrest_backup_info* ba
    struct json* pg_files = NULL;
    time_t timestamp;
    struct pgbackrest_backup_info* bck = NULL;
+   char* info[MANIFEST_COLUMN_COUNT];
 
    if (backup == NULL)
    {
@@ -2092,6 +2114,11 @@ get_and_set_file_manifest(struct art* backups, struct pgbackrest_backup_info* ba
       pgmoneta_log_error("Failed to add file to file array: %s", relative_path);
       goto error;
    }
+
+   //TODO: relative path might not be the manifest path for table spaces, need to handle differently
+   info[MANIFEST_PATH_INDEX] = relative_path;
+   info[MANIFEST_CHECKSUM_INDEX] = (char*)pgmoneta_json_get(pg_file, MANIFEST_FILE_KEY_CHECKSUM);
+   pgmoneta_csv_write(writer, MANIFEST_COLUMN_COUNT, info);
 
    free(target_bck_id);
    free(file_path);

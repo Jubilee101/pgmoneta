@@ -165,6 +165,20 @@ pgmoneta_manifest_get_paths(char* manifest_path, struct deque** paths);
 int
 pgmoneta_manifest_get_directories(char* manifest_path, struct deque** dirs);
 
+/**
+ * A directory holding no files has no entry of its own in the PostgreSQL
+ * manifest, so it would be lost by anything that reconstructs a backup from the
+ * file list alone. Record every directory with a trailing slash so those
+ * consumers can tell the two apart; the checksum column is not meaningful for a
+ * directory and is written as "-". 
+ * @param writer The CSV writer
+ * @param base The base directory
+ * @param relative The relative directory
+ * @return int 0 upon success, otherwise 1
+ */
+int
+pgmoneta_manifest_write_directory_entries(struct csv_writer* writer, char* base, char* relative);
+
 #ifdef __cplusplus
 }
 #endif
