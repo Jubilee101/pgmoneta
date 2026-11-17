@@ -67,6 +67,7 @@ struct pgbackrest_backup_info
    char* archive_start;
    char* archive_stop;
    char* backup_id;
+   char* target_backup_id;
    char** backup_chain; // from oldest to newest
    int backup_chain_size;
    char* backup_parent;
@@ -103,7 +104,7 @@ static int pgbackrest_backup_info_create(char* backup_id, struct json* info, str
 static void pgbackrest_backup_info_destroy(struct pgbackrest_backup_info* backup);
 static void pgbackrest_backup_info_destroy_cb(uintptr_t data);
 static void get_target_backup_id(time_t start_time, char** target_id);
-static int migrate_pgbackrest_backup(struct art* backups, struct pgbackrest_backup_info* backup_info, char* password, char* root_workspace, char* source_dir, char* target_data_dir, char* target_wal_dir);
+static int migrate_pgbackrest_backup(struct art* backups, struct pgbackrest_backup_info* prev_backup_info, struct pgbackrest_backup_info* backup_info, char* password, char* root_workspace, char* source_dir, char* target_data_dir, char* target_wal_dir);
 static void pgbackrest_manifest_create(struct pgbackrest_manifest** manifest);
 static void pgbackrest_manifest_destroy(struct pgbackrest_manifest* manifest);
 static int pgbackrest_manifest_validate(struct pgbackrest_manifest* manifest);
@@ -127,6 +128,7 @@ static int timeline_history_create(struct timeline_history** entry);
 static int wal_range_create(uint32_t tli, char* start_lsn, char* stop_lsn, struct json** range);
 static int add_pg_manifest_info(struct pgbackrest_manifest* manifest, struct json* pg_manifest);
 static int get_and_set_file_manifest(struct art* backups, struct pgbackrest_backup_info* backup, char* reference_backup_id, char* target_data_dir, char* relative_path, struct pgbackrest_manifest* manifest, struct json* pg_manifest, struct csv_writer* writer);
+static int link_backups(char* data_dir, struct pgbackrest_backup_info* from_bck, struct pgbackrest_backup_info* to_bck);
 
 int
 pgmoneta_migrate(char* backup_id, char* server, char* workspace)
@@ -186,6 +188,7 @@ migrate_pgbackrest(char* source_data_dir, char* source_wal_dir, char* target_bas
    struct art* backups = NULL;
    struct pgbackrest_backup_info* bck = NULL;
    struct muse_configuration* conf = NULL;
+   struct pgbackrest_backup_info* prev_backup = NULL;
 
    conf = (struct muse_configuration*)shmem;
 
@@ -241,16 +244,17 @@ migrate_pgbackrest(char* source_data_dir, char* source_wal_dir, char* target_bas
          pgmoneta_log_error("Failed to find parent backup %s", parent_backup_id);
          goto error;
       }
-      if (migrate_pgbackrest_backup(backups, b, password, workspace, source_data_dir, target_data_dir, target_wal_dir))
+      if (migrate_pgbackrest_backup(backups, prev_backup, b, password, workspace, source_data_dir, target_data_dir, target_wal_dir))
       {
          pgmoneta_log_error("Failed to migrate backup %s", b->backup_id);
          goto error;
       }
+      prev_backup = b;
       pgmoneta_log_info("Successfully migrated parent backup %s", parent_backup_id);
    }
 
    pgmoneta_log_info("Start migrating backup %s", bck->backup_id);
-   if (migrate_pgbackrest_backup(backups, bck, password, workspace, source_data_dir, target_data_dir, target_wal_dir))
+   if (migrate_pgbackrest_backup(backups, prev_backup, bck, password, workspace, source_data_dir, target_data_dir, target_wal_dir))
    {
       pgmoneta_log_error("Failed to migrate backup %s", bck->backup_id);
       goto error;
@@ -616,6 +620,7 @@ pgbackrest_backup_info_create(char* backup_id, struct json* info, struct pgbackr
    }
 
    b->backup_id = pgmoneta_append(b->backup_id, backup_id);
+   get_target_backup_id(b->start_time, &b->target_backup_id);
    if (pgmoneta_json_contains_key(info, "backup-prior"))
    {
       b->backup_parent = pgmoneta_append(b->backup_parent, (char*)pgmoneta_json_get(info, "backup-prior"));
@@ -668,6 +673,7 @@ pgbackrest_backup_info_destroy(struct pgbackrest_backup_info* backup)
    free(backup->backup_chain);
    free(backup->backup_parent);
    free(backup->backup_id);
+   free(backup->target_backup_id);
    free(backup);
 }
 
@@ -744,9 +750,8 @@ get_target_backup_id(time_t start_time, char** target_id)
 }
 
 static int
-migrate_pgbackrest_backup(struct art* backups, struct pgbackrest_backup_info* backup_info, char* password, char* root_workspace, char* source_dir, char* target_data_dir, char* target_wal_dir)
+migrate_pgbackrest_backup(struct art* backups, struct pgbackrest_backup_info* prev_backup_info, struct pgbackrest_backup_info* backup_info, char* password, char* root_workspace, char* source_dir, char* target_data_dir, char* target_wal_dir)
 {
-   char* target_backup_id = NULL;
    char source_backup_path[MAX_PATH];
    char source_backup_data_path[MAX_PATH];
    char target_backup_path[MAX_PATH];
@@ -781,12 +786,11 @@ migrate_pgbackrest_backup(struct art* backups, struct pgbackrest_backup_info* ba
    memset(workspace, 0, sizeof(workspace));
    memset(data_workspace, 0, sizeof(data_workspace));
 
-   get_target_backup_id(backup_info->start_time, &target_backup_id);
    snprintf(source_backup_path, sizeof(source_backup_path), "%s%s/", source_dir, backup_info->backup_id);
-   snprintf(target_backup_path, sizeof(target_backup_path), "%s%s/", target_data_dir, target_backup_id);
+   snprintf(target_backup_path, sizeof(target_backup_path), "%s%s/", target_data_dir, backup_info->target_backup_id);
    snprintf(workspace, sizeof(workspace), "%s%s/", root_workspace, backup_info->backup_id);
    snprintf(source_backup_data_path, sizeof(source_backup_data_path), "%s%s/pg_data/", source_dir, backup_info->backup_id);
-   snprintf(target_backup_data_path, sizeof(target_backup_data_path), "%s%s/data/", target_data_dir, target_backup_id);
+   snprintf(target_backup_data_path, sizeof(target_backup_data_path), "%s%s/data/", target_data_dir, backup_info->target_backup_id);
    snprintf(data_workspace, sizeof(data_workspace), "%s%s/data/", root_workspace, backup_info->backup_id);
    manifest_path = pgmoneta_format_and_append(manifest_path, "%s%s", target_data_dir, "backup.manifest");
 
@@ -886,7 +890,15 @@ migrate_pgbackrest_backup(struct art* backups, struct pgbackrest_backup_info* ba
       goto error;
    }
 
-   //TODO: wf_migration: manifest, compress, encrypt, link
+   //TODO: wf_migration: compress, encrypt, link
+   if (prev_backup_info != NULL)
+   {
+      if (link_backups(target_data_dir, backup_info, prev_backup_info))
+      {
+         pgmoneta_log_error("Failed to link backup %s to %s", backup_info->target_backup_id, prev_backup_info->target_backup_id);
+         goto error;
+      }
+   }
 
    backup->backup_size = pgmoneta_directory_size(target_backup_path);
    pgmoneta_log_info("Writing backup info to %s%s/backup.info", target_data_dir, backup->label);
@@ -900,7 +912,6 @@ migrate_pgbackrest_backup(struct art* backups, struct pgbackrest_backup_info* ba
    pgmoneta_json_destroy(pg_manifest);
    pgmoneta_csv_writer_destroy(writer);
    free(manifest_path);
-   free(target_backup_id);
    free(backup);
    return 0;
 error:
@@ -909,7 +920,6 @@ error:
    pgmoneta_json_destroy(pg_manifest);
    pgmoneta_csv_writer_destroy(writer);
    free(manifest_path);
-   free(target_backup_id);
    free(backup);
    return 1;
 }
@@ -1155,13 +1165,11 @@ migrate_pgbackrest_file(struct art* backups, struct pgbackrest_backup_info* back
    char* target_file_path = NULL;
    char* workspace_file_path = NULL;
    struct json* file_info = NULL;
-   char* target_backup_id = NULL;
    char* reference_backup_id = NULL;
 
    source_file_path = pgmoneta_format_and_append(source_file_path, "%s%s", source_root_dir, relative_path);
    target_file_path = pgmoneta_format_and_append(target_file_path, "%s%s", target_root_dir, relative_path);
    workspace_file_path = pgmoneta_format_and_append(workspace_file_path, "%s%s", workspace_root_dir, relative_path);
-   get_target_backup_id(backup_info->start_time, &target_backup_id);
 
    switch (manifest->compression)
    {
@@ -1242,13 +1250,11 @@ migrate_pgbackrest_file(struct art* backups, struct pgbackrest_backup_info* back
    free(source_file_path);
    free(target_file_path);
    free(workspace_file_path);
-   free(target_backup_id);
    return 0;
 error:
    free(source_file_path);
    free(target_file_path);
    free(workspace_file_path);
-   free(target_backup_id);
    return 1;
 }
 
@@ -1743,12 +1749,10 @@ set_backup_info(char* target_backup_data_path, struct pgbackrest_backup_info* ba
 {
    struct backup* bck = NULL;
    char* wal = NULL;
-   char* label = NULL;
    struct art_iterator* iter = NULL;
    struct muse_configuration* conf = NULL;
 
    conf = (struct muse_configuration*)shmem;
-   get_target_backup_id(backup_info->start_time, &label);
    bck = (struct backup*)malloc(sizeof(struct backup));
    memset(bck, 0, sizeof(struct backup));
 
@@ -1757,7 +1761,7 @@ set_backup_info(char* target_backup_data_path, struct pgbackrest_backup_info* ba
    bck->number_of_tablespaces = 0;
    bck->compression = conf->compression;
    bck->encryption = conf->encryption;
-   memcpy(bck->label, label, strlen(label));
+   memcpy(bck->label, backup_info->target_backup_id, strlen(backup_info->target_backup_id));
    if (pgmoneta_read_wal(target_backup_data_path, &wal))
    {
       pgmoneta_log_error("Failed to get wal from %spg_wal/", target_backup_data_path);
@@ -1803,13 +1807,11 @@ set_backup_info(char* target_backup_data_path, struct pgbackrest_backup_info* ba
    *backup = bck;
 
    pgmoneta_art_iterator_destroy(iter);
-   free(label);
    free(wal);
    return 0;
 error:
    pgmoneta_art_iterator_destroy(iter);
    free(wal);
-   free(label);
    return 1;
 }
 
@@ -2050,7 +2052,6 @@ error:
 static int
 get_and_set_file_manifest(struct art* backups, struct pgbackrest_backup_info* backup, char* reference_backup_id, char* target_data_dir, char* relative_path, struct pgbackrest_manifest* manifest, struct json* pg_manifest, struct csv_writer* writer)
 {
-   char* target_bck_id = NULL;
    char* file_path = NULL;
    struct json* file = NULL;
    struct json* pg_file = NULL;
@@ -2099,8 +2100,7 @@ get_and_set_file_manifest(struct art* backups, struct pgbackrest_backup_info* ba
       }
    }
 
-   get_target_backup_id(bck->start_time, &target_bck_id);
-   file_path = pgmoneta_format_and_append(file_path, "%s%s/%s", target_data_dir, target_bck_id, relative_path);
+   file_path = pgmoneta_format_and_append(file_path, "%s%s/%s", target_data_dir, bck->target_backup_id, relative_path);
 
    //TODO: relative path might not be the manifest path for table spaces, need to handle differently
    if (pgmoneta_get_file_manifest(file_path, relative_path, timestamp, &pg_file))
@@ -2120,11 +2120,38 @@ get_and_set_file_manifest(struct art* backups, struct pgbackrest_backup_info* ba
    info[MANIFEST_CHECKSUM_INDEX] = (char*)pgmoneta_json_get(pg_file, MANIFEST_FILE_KEY_CHECKSUM);
    pgmoneta_csv_write(writer, MANIFEST_COLUMN_COUNT, info);
 
-   free(target_bck_id);
    free(file_path);
    return 0;
 error:
    free(file_path);
-   free(target_bck_id);
    return 1;
+}
+
+static int
+link_backups(char* data_dir, struct pgbackrest_backup_info* from_bck, struct pgbackrest_backup_info* to_bck)
+{
+   char* from = NULL;
+   char* to = NULL;
+   char* from_manifest = NULL;
+   char* to_manifest = NULL;
+   struct art* deleted_files = NULL;
+   struct art* changed_files = NULL;
+   struct art* added_files = NULL;
+
+   from = pgmoneta_format_and_append(from, "%s%s/data/", data_dir, from_bck->target_backup_id);
+   to = pgmoneta_format_and_append(to, "%s%s/data/", data_dir, to_bck->target_backup_id);
+
+   from_manifest = pgmoneta_format_and_append(from_manifest, "%s%s/backup.manifest", data_dir, from_bck->target_backup_id);
+   to_manifest = pgmoneta_format_and_append(to_manifest, "%s%s/backup.manifest", data_dir, to_bck->target_backup_id);
+
+   pgmoneta_compare_manifests(to_manifest, from_manifest, &deleted_files, &changed_files, &added_files);
+   pgmoneta_link_manifest(from, to, from, changed_files, added_files, NULL);
+
+   free(from);
+   free(to);
+   free(from_manifest);
+   free(to_manifest);
+   pgmoneta_art_destroy(changed_files);
+   pgmoneta_art_destroy(added_files);
+   pgmoneta_art_destroy(deleted_files);
 }
